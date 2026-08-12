@@ -1,0 +1,72 @@
+"""
+Dual Progress Bar Component for SD-FastBackup.
+Displays Overall Progress %, Current File Progress %, Transfer Speed, and File Counter.
+"""
+from PySide6.QtWidgets import QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar
+
+
+class ProgressPanelWidget(QGroupBox):
+    """Dual Progress Meter & Transfer Speed Tracker Widget."""
+
+    def __init__(self, parent=None):
+        super().__init__("BACKUP PIPELINE PROGRESS", parent)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        # 1. Status Label Row
+        self.status_label = QLabel("Status: Idle")
+        self.status_label.setStyleSheet("font-weight: bold; color: #E0E0E0;")
+        layout.addWidget(self.status_label)
+
+        # 2. Overall Progress Meter
+        overall_layout = QHBoxLayout()
+        overall_title = QLabel("Overall Progress:")
+        overall_title.setFixedWidth(120)
+        self.overall_bar = QProgressBar()
+        self.overall_bar.setRange(0, 100)
+        self.overall_bar.setValue(0)
+        overall_layout.addWidget(overall_title)
+        overall_layout.addWidget(self.overall_bar, 1)
+        layout.addLayout(overall_layout)
+
+        # 3. Current File Progress Meter
+        file_layout = QHBoxLayout()
+        file_title = QLabel("Current File:")
+        file_title.setFixedWidth(120)
+        self.file_bar = QProgressBar()
+        self.file_bar.setRange(0, 100)
+        self.file_bar.setValue(0)
+        file_layout.addWidget(file_title)
+        file_layout.addWidget(self.file_bar, 1)
+        layout.addLayout(file_layout)
+
+        # 4. Details / Speed Indicator
+        self.details_label = QLabel("Files: 0 / 0 | Bytes: 0 B | Speed: --")
+        self.details_label.setStyleSheet("color: #00ADB5; font-size: 12px;")
+        layout.addWidget(self.details_label)
+
+    def reset_progress(self):
+        self.overall_bar.setValue(0)
+        self.file_bar.setValue(0)
+        self.status_label.setText("Status: Idle")
+        self.details_label.setText("Files: 0 / 0 | Bytes: 0 B | Speed: --")
+
+    def update_overall(self, current: int, total: int, status_msg: str = ""):
+        pct = int((current / total * 100)) if total > 0 else 0
+        self.overall_bar.setValue(pct)
+        if status_msg:
+            self.status_label.setText(f"Status: {status_msg}")
+
+    def update_file_progress(self, percent: int, filename: str = ""):
+        self.file_bar.setValue(percent)
+        if filename:
+            self.status_label.setText(f"Status: {filename}")
+
+    def update_details(self, files_str: str, bytes_str: str, speed_str: str = ""):
+        text = f"Files: {files_str} | Transferred: {bytes_str}"
+        if speed_str:
+            text += f" | Speed: {speed_str}"
+        self.details_label.setText(text)
