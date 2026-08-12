@@ -84,6 +84,16 @@ class MetadataExtractor:
             return now, "FALLBACK"
 
     @classmethod
+    def compute_hash_from_values(cls, date_taken: datetime, size_bytes: int) -> str:
+        """
+        Generates SHA256 composite hash string directly from date_taken datetime and size_bytes.
+        Used for virtual MTP files where date and size are already extracted.
+        """
+        iso_date = date_taken.strftime("%Y-%m-%dT%H:%M:%S")
+        raw_key = f"{iso_date}_{size_bytes}"
+        return hashlib.sha256(raw_key.encode('utf-8')).hexdigest()
+
+    @classmethod
     def compute_composite_hash(cls, file_path: str) -> Tuple[str, int, datetime, str]:
         """
         Generates SHA256 composite hash string from: f"{date_taken_iso}_{file_size_bytes}"
@@ -92,8 +102,5 @@ class MetadataExtractor:
         size = cls.get_file_size(file_path)
         date_taken, source = cls.extract_date_taken(file_path)
 
-        iso_date = date_taken.strftime("%Y-%m-%dT%H:%M:%S")
-        raw_key = f"{iso_date}_{size}"
-
-        composite_hash = hashlib.sha256(raw_key.encode('utf-8')).hexdigest()
+        composite_hash = cls.compute_hash_from_values(date_taken, size)
         return composite_hash, size, date_taken, source
