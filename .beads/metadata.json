@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "sd_backup",
+  "project_id": "4a83efbb-a49e-4e76-aa75-fe9caf880b61"
+}
