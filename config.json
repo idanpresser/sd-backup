@@ -1,0 +1,10 @@
+{
+  "fastcopy_path": "",
+  "custom_suffix": "",
+  "target_directory": "",
+  "subfolder_options": {
+    "dcim": true,
+    "private": true,
+    "full_volume": false
+  }
+}
