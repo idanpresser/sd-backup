@@ -1,7 +1,7 @@
 """
 Windows Shell COM MTP & PTP Driver for SD-FastBackup.
 Provides MTP/PTP (Media & Picture Transfer Protocol) device detection, virtual directory traversal, 
-metadata extraction, stream copying, and subfolder fallback resolution for smartphones (Android & iPhone).
+metadata extraction, stream copying, subfolder fallback, and async USB folder polling for smartphones (Android & iPhone).
 """
 import os
 import sys
@@ -85,7 +85,7 @@ class MTPEngine:
                     item_type = str(getattr(item, 'Type', '') or '')
                     
                     is_standard_drive = (len(item_path) == 3 and item_path[1:3] == ":\\") or item_path.endswith(":\\")
-                    is_usb_guid = "\\\\?\\usb#" in item_path.lower() or "\\\\?\\wce#" in item_path.lower()
+                    is_usb_guid = "usb#" in item_path.lower() or "wce#" in item_path.lower()
                     is_mobile_type = any(kw in item_type.lower() for kw in [
                         "mobile", "phone", "portable", "camera", "media player", 
                         "mtp", "ptp", "iphone", "android", "pixel", "galaxy", "oppo"
@@ -143,20 +143,26 @@ class MTPEngine:
 
         target_folder = root_folder
 
-        # If subfolder_path is specified, navigate into it
+        # If subfolder_path is specified, navigate into it with retry polling
         if subfolder_path:
             sub_parts = subfolder_path.replace("/", "\\").split("\\")
             for part in sub_parts:
                 if not part:
                     continue
                 found_sub = None
-                try:
-                    for item in target_folder.Items():
-                        if item.IsFolder and str(item.Name).lower() == part.lower():
-                            found_sub = item.GetFolder
-                            break
-                except Exception:
-                    pass
+                
+                # Retry loop for async USB folder resolution
+                for attempt in range(5):
+                    try:
+                        for item in target_folder.Items():
+                            if item.IsFolder and str(item.Name).lower() == part.lower():
+                                found_sub = item.GetFolder
+                                break
+                    except Exception:
+                        pass
+                    if found_sub:
+                        break
+                    time.sleep(0.15)
 
                 if found_sub:
                     target_folder = found_sub
@@ -164,7 +170,7 @@ class MTPEngine:
                     logging.warning(f"MTP subfolder part '{part}' not found in '{device_name}'")
                     break
 
-        # 1. Primary traversal
+        # 1. Primary traversal with async polling
         self._traverse_folder(target_folder, "", file_list, include_dcim, include_private, full_volume)
 
         # 2. Fallback to device root traversal if 0 files found and subfolder_path was specified
@@ -183,9 +189,18 @@ class MTPEngine:
         include_private: bool, 
         full_volume: bool
     ):
-        """Recursively traverses MTP virtual shell folders, applying multi-layer media filter."""
+        """Recursively traverses MTP virtual shell folders with async USB retry polling."""
         try:
-            items = folder_item.Items()
+            items = []
+            for attempt in range(5):
+                try:
+                    items = list(folder_item.Items())
+                    if items:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.15)
+
             for item in items:
                 name = str(item.Name)
                 name_upper = name.upper()

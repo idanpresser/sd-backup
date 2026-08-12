@@ -15,6 +15,9 @@ import time
 import shutil
 import tempfile
 
+# Ensure project root is in sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 def run_steel_thread():
     print("=" * 75)
     print("🚀 MTP STEEL THREAD TEST - END-TO-END VERTICAL DIAGNOSTIC")
@@ -70,7 +73,16 @@ def run_steel_thread():
         print("  ❌ LAYER 3 FAILED: GetFolder returned None.")
         return False
 
-    sub_units = list(phone_folder.Items())
+    sub_units = []
+    for attempt in range(5):
+        try:
+            sub_units = list(phone_folder.Items())
+            if sub_units:
+                break
+        except Exception:
+            pass
+        time.sleep(0.2)
+
     print(f"  Found {len(sub_units)} storage sub-unit(s) in root:")
     for unit in sub_units:
         print(f"    • Sub-unit: '{unit.Name}' | Path: {unit.Path[:60]}...")
@@ -93,7 +105,16 @@ def run_steel_thread():
     
     def traverse(folder, current_path=""):
         try:
-            items = list(folder.Items())
+            items = []
+            for attempt in range(5):
+                try:
+                    items = list(folder.Items())
+                    if items:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.2)
+
             for item in items:
                 name = str(item.Name)
                 rel_path = f"{current_path}/{name}" if current_path else name
