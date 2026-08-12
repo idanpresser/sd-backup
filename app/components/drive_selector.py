@@ -1,6 +1,6 @@
 """
 Drive & Source Device Selector Component for SD-FastBackup.
-Allows selecting source drive letters (E:\\, F:\\), connected MTP Mobile Phones (Pixel 8, iPhone),
+Allows selecting source drive letters (E:\\, F:\\), connected MTP Mobile Phones (Pixel 8 Pro, iPhone),
 browsing custom folders, target backup directory, and options.
 """
 import os
@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal
 from utils.drive_detector import get_available_drives, is_same_drive
 from utils.path_formatter import normalize_win_path
-from core.mtp_engine import is_mtp_path
+from core.mtp_engine import is_mtp_path, browse_with_windows_shell
 
 
 class DriveSelectorWidget(QGroupBox):
@@ -140,6 +140,15 @@ class DriveSelectorWidget(QGroupBox):
         self.update_move_mode_availability()
 
     def _browse_source_folder(self):
+        """Launches Windows Shell BrowseForFolder dialog supporting both local drives & MTP phones."""
+        hwnd = int(self.winId()) if self.winId() else 0
+        shell_path = browse_with_windows_shell(hwnd)
+        if shell_path:
+            self.set_selected_source_path(shell_path)
+            self.drive_changed.emit(shell_path)
+            return
+
+        # Fallback Qt QFileDialog
         folder = QFileDialog.getExistingDirectory(self, "Select Source Directory / SD Folder")
         if folder:
             norm_f = normalize_win_path(folder)
