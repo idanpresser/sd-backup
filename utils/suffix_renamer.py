@@ -1,6 +1,7 @@
 """
 Suffix Renamer Helper for SD-FastBackup.
 Renames file suffixes on disk and updates the target SQLite database catalog (.sd_backup_catalog.db).
+Resolves relative paths, basenames, and full paths specified in file list text files.
 """
 import os
 import sys
@@ -21,9 +22,9 @@ def rename_suffix_in_backup(
     
     Args:
         root_dir: Target backup root directory (where .sd_backup_catalog.db lives)
-        old_suffix: Old suffix substring to replace (e.g. "AnatKP(C)")
+        old_suffix: Old suffix substring to replace (e.g. "AnatKP(C)" or "GuyPresser(C)")
         new_suffix: New replacement suffix string (e.g. "IdanPresser(C)")
-        file_list_path: Optional path to a text file listing specific target files
+        file_list_path: Optional path to a text file listing specific target files/basenames
         
     Returns:
         Dict with summary counts: scanned_count, renamed_count, db_updated_count, errors
@@ -41,15 +42,54 @@ def rename_suffix_in_backup(
 
     target_files: List[str] = []
 
-    # 1. Determine list of files to rename
+    # Build a lookup of all files on disk under norm_root for fast resolution of basenames
+    file_disk_map: Dict[str, str] = {}
+    for root, _, files in os.walk(norm_root):
+        for fname in files:
+            if not fname.startswith('.'):
+                norm_full = normalize_win_path(os.path.join(root, fname))
+                file_disk_map[fname] = norm_full
+
+    # 1. Determine list of target files to rename
     if file_list_path and os.path.exists(file_list_path):
         with open(file_list_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 cleaned = line.strip().strip('"\'')
-                if cleaned and not cleaned.startswith('#'):
-                    # Normalize path relative to root_dir if needed
-                    full_p = cleaned if os.path.isabs(cleaned) else os.path.join(norm_root, cleaned)
-                    target_files.append(normalize_win_path(full_p))
+                if not cleaned or cleaned.startswith('#'):
+                    continue
+
+                norm_cleaned = normalize_win_path(cleaned)
+                basename = os.path.basename(norm_cleaned)
+
+                resolved_path = ""
+
+                # Check if cleaned is already an absolute path that exists
+                if os.path.isabs(norm_cleaned) and os.path.exists(norm_cleaned):
+                    resolved_path = norm_cleaned
+                # Check direct join with root
+                elif os.path.exists(os.path.join(norm_root, norm_cleaned)):
+                    resolved_path = normalize_win_path(os.path.join(norm_root, norm_cleaned))
+                # Check DB for matching destination_path
+                elif conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT destination_path FROM transfer_manifest WHERE destination_path LIKE ?",
+                        (f"%{basename}",)
+                    )
+                    row = cursor.fetchone()
+                    if row and row["destination_path"]:
+                        resolved_path = normalize_win_path(row["destination_path"])
+
+                # Check disk map as fallback
+                if not resolved_path and basename in file_disk_map:
+                    resolved_path = file_disk_map[basename]
+
+                if not resolved_path:
+                    # Fallback to projected target path under root
+                    resolved_path = normalize_win_path(os.path.join(norm_root, norm_cleaned))
+
+                if resolved_path not in target_files:
+                    target_files.append(resolved_path)
     else:
         # Scan SQLite database if present, or search filesystem root_dir
         if conn:
@@ -64,12 +104,9 @@ def rename_suffix_in_backup(
                     target_files.append(dest_p)
 
         # Also walk root_dir on disk for any files matching old_suffix
-        for root, _, files in os.walk(norm_root):
-            for fname in files:
-                if old_suffix in fname and not fname.startswith('.'):
-                    full_p = normalize_win_path(os.path.join(root, fname))
-                    if full_p not in target_files:
-                        target_files.append(full_p)
+        for fname, full_p in file_disk_map.items():
+            if old_suffix in fname and full_p not in target_files:
+                target_files.append(full_p)
 
     renamed_count = 0
     db_updated_count = 0
@@ -104,11 +141,21 @@ def rename_suffix_in_backup(
         # Update SQLite database catalog
         if conn:
             try:
-                conn.execute(
+                cursor = conn.cursor()
+                cursor.execute(
                     "UPDATE transfer_manifest SET destination_path = ? WHERE destination_path = ?",
                     (new_path, norm_old_path)
                 )
-                db_updated_count += 1
+                if cursor.rowcount > 0:
+                    db_updated_count += cursor.rowcount
+                else:
+                    # Try matching by basename in DB
+                    cursor.execute(
+                        "UPDATE transfer_manifest SET destination_path = ? WHERE destination_path LIKE ?",
+                        (new_path, f"%{base_name}")
+                    )
+                    if cursor.rowcount > 0:
+                        db_updated_count += cursor.rowcount
             except Exception as e:
                 logging.error(f"Error updating SQLite catalog for '{norm_old_path}': {e}")
                 errors += 1

@@ -49,7 +49,7 @@ def test_rename_suffix_all_files(mock_backup_environment):
     assert os.path.exists(new_f1)
     assert os.path.exists(new_f2)
 
-def test_rename_suffix_with_file_list(mock_backup_environment, tmp_path):
+def test_rename_suffix_with_file_list_full_paths(mock_backup_environment, tmp_path):
     root_dir, f1_old, f2_old = mock_backup_environment
 
     list_file = tmp_path / "file_list.txt"
@@ -65,4 +65,25 @@ def test_rename_suffix_with_file_list(mock_backup_environment, tmp_path):
     assert stats["renamed_count"] == 1
     new_f1 = f1_old.replace("AnatKP(C)", "IdanPresser(C)")
     assert os.path.exists(new_f1)
+    assert os.path.exists(f2_old)  # f2 was not in list, remains unchanged
+
+def test_rename_suffix_with_file_list_basenames_only(mock_backup_environment, tmp_path):
+    root_dir, f1_old, f2_old = mock_backup_environment
+
+    # Pass ONLY the basename in file_list.txt
+    basename1 = os.path.basename(f1_old)
+    list_file = tmp_path / "file_list_basenames.txt"
+    list_file.write_text(f"{basename1}\n")
+
+    stats = rename_suffix_in_backup(
+        root_dir=root_dir,
+        old_suffix="AnatKP(C)",
+        new_suffix="IdanPresser(C)",
+        file_list_path=str(list_file)
+    )
+
+    assert stats["renamed_count"] == 1
+    new_f1 = f1_old.replace("AnatKP(C)", "IdanPresser(C)")
+    assert os.path.exists(new_f1)
+    assert not os.path.exists(f1_old)
     assert os.path.exists(f2_old)  # f2 was not in list, remains unchanged
