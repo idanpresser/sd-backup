@@ -1,12 +1,32 @@
 """
 Drive detector utility for SD-FastBackup.
-Enumerates attached drives, removable media (SD cards), volume labels, and serial numbers.
+Enumerates attached drives, removable media (SD cards), volume labels, serial numbers, and same-drive checks.
 """
 import os
 import sys
 import ctypes
 import shutil
 from typing import List, Dict, Any
+
+
+def is_same_drive(path_a: str, path_b: str) -> bool:
+    """
+    Returns True if both paths reside on the same drive/volume root (e.g. both on C:\\ or both on D:\\).
+    """
+    if not path_a or not path_b:
+        return False
+
+    abs_a = os.path.abspath(path_a)
+    abs_b = os.path.abspath(path_b)
+
+    drive_a, _ = os.path.splitdrive(abs_a)
+    drive_b, _ = os.path.splitdrive(abs_b)
+
+    if drive_a and drive_b:
+        return drive_a.upper() == drive_b.upper()
+
+    # On POSIX / Linux / macOS, compare mount points or root dirs
+    return os.path.dirname(abs_a) == os.path.dirname(abs_b) or abs_a.split(os.sep)[1:2] == abs_b.split(os.sep)[1:2]
 
 
 def get_drive_volume_info(drive_path: str) -> Dict[str, str]:
@@ -19,7 +39,6 @@ def get_drive_volume_info(drive_path: str) -> Dict[str, str]:
     if not drive_path:
         return {"label": label, "serial": serial}
 
-    # Normalize drive path format e.g. "E:\\"
     drive_root = drive_path.rstrip("\\") + "\\"
 
     if sys.platform == "win32":
@@ -68,8 +87,6 @@ def get_available_drives() -> List[Dict[str, Any]]:
                 if bitmask & (1 << letter_code):
                     drive_letter = f"{chr(65 + letter_code)}:\\"
                     
-                    # Get Drive Type
-                    # 2: DRIVE_REMOVABLE, 3: DRIVE_FIXED, 4: DRIVE_REMOTE, 5: DRIVE_CDROM, 6: DRIVE_RAMDISK
                     dtype_code = ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive_letter))
                     type_str = "Removable" if dtype_code == 2 else ("Fixed" if dtype_code == 3 else "Other")
 
@@ -94,7 +111,6 @@ def get_available_drives() -> List[Dict[str, Any]]:
         except Exception:
             pass
     else:
-        # Cross-platform fallback for testing
         test_paths = ["/Volumes", "/media", "/mnt", "."]
         for p in test_paths:
             if os.path.exists(p):

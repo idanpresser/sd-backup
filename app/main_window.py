@@ -29,8 +29,8 @@ class MainWindow(QMainWindow):
     def __init__(self, config_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("SD-FastBackup")
-        self.resize(980, 750)
-        self.setMinimumSize(850, 620)
+        self.resize(980, 760)
+        self.setMinimumSize(850, 640)
 
         self.config_path = config_path or os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
         self.worker: Optional[BackupWorker] = None
@@ -164,7 +164,12 @@ class MainWindow(QMainWindow):
                         self.drive_selector.private_cb.setChecked(sub_opts["private"])
                     if "full_volume" in sub_opts:
                         self.drive_selector.full_vol_cb.setChecked(sub_opts["full_volume"])
-                        
+                    if "move_mode" in sub_opts:
+                        if self.drive_selector.move_cb.isEnabled():
+                            self.drive_selector.move_cb.setChecked(sub_opts["move_mode"])
+
+                    self.drive_selector.update_move_mode_availability()
+
             except Exception as e:
                 logging.warning(f"Could not load config file: {e}")
 
@@ -190,6 +195,7 @@ class MainWindow(QMainWindow):
         target_dir = self.drive_selector.get_target_directory()
         suffix = self.drive_selector.get_custom_suffix()
         folder_opts = self.drive_selector.get_selected_options()
+        is_move = self.drive_selector.get_is_move_mode()
 
         if not source_location or not os.path.exists(source_location):
             self.alert_banner.show_alert("Please select a valid source drive or folder.", level="ERROR")
@@ -212,7 +218,8 @@ class MainWindow(QMainWindow):
             target_dir=target_dir,
             fastcopy_path=self.fastcopy_path,
             custom_suffix=suffix,
-            folder_opts=folder_opts
+            folder_opts=folder_opts,
+            move_mode=is_move
         )
 
         # Wire worker signals to GUI
@@ -248,7 +255,8 @@ class MainWindow(QMainWindow):
     def _on_transfer_started(self, total_files: int, total_bytes: float):
         self.progress_panel.reset_for_transfer(total_files, total_bytes)
         gb = total_bytes / (1024 ** 3)
-        self.log_console.append_trace(f"🚀 FastCopy execution phase started ({total_files} files, {gb:.2f} GB)")
+        mode_str = "Same-Drive Instant Move" if (self.worker and self.worker.move_mode) else "FastCopy Batch Transfer"
+        self.log_console.append_trace(f"🚀 {mode_str} phase started ({total_files} files, {gb:.2f} GB)")
 
     def _on_transfer_progress(self, copied_count: int, total_files: int, current_filename: str, file_pct: int):
         self.progress_panel.update_transfer_progress(copied_count, total_files, current_filename, file_pct)
@@ -268,7 +276,9 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(False)
         self.progress_panel.overall_bar.setValue(100)
         self.progress_panel.file_bar.setValue(100)
-        self.progress_panel.status_label.setText("Status: Backup Completed Successfully 🎉")
+        
+        mode_str = "Move" if (self.worker and self.worker.move_mode) else "Backup"
+        self.progress_panel.status_label.setText(f"Status: {mode_str} Completed Successfully 🎉")
 
         scanned = summary.get("scanned", 0)
         copied = summary.get("copied", 0)
@@ -276,12 +286,12 @@ class MainWindow(QMainWindow):
         gb = summary.get("bytes", 0) / (1024 ** 3)
         errs = summary.get("errors", 0)
 
-        details = f"Scanned: {scanned} | Copied: {copied} | Skipped Duplicates: {dups} | {gb:.2f} GB"
+        details = f"Scanned: {scanned} | Processed: {copied} | Skipped Duplicates: {dups} | {gb:.2f} GB"
         if errs > 0:
             details += f" | Errors: {errs}"
-        self.progress_panel.update_details(f"{copied} copied", f"{gb:.2f} GB")
+        self.progress_panel.update_details(f"{copied} processed", f"{gb:.2f} GB")
 
-        self.log_console.append_trace(f"✅ BACKUP COMPLETE: {details}")
+        self.log_console.append_trace(f"✅ OPERATION COMPLETE: {details}")
 
     def _on_backup_error(self, fatal_err: str):
         self.start_btn.setEnabled(True)

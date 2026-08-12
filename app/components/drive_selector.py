@@ -1,6 +1,7 @@
 """
 Drive & Source Folder Selector Component for SD-FastBackup.
-Allows selecting source drive or browsing custom source folder, target backup directory, and folder options.
+Allows selecting source drive or browsing custom source folder, target backup directory, options,
+and Same-Drive instant Move Mode auto-detection.
 """
 import os
 from PySide6.QtWidgets import (
@@ -8,7 +9,7 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QLineEdit, QCheckBox, QFileDialog
 )
 from PySide6.QtCore import Signal
-from utils.drive_detector import get_available_drives
+from utils.drive_detector import get_available_drives, is_same_drive
 from utils.path_formatter import normalize_win_path
 
 
@@ -36,6 +37,7 @@ class DriveSelectorWidget(QGroupBox):
         self.drive_combo = QComboBox()
         self.drive_combo.setEditable(True)
         self.drive_combo.setMinimumWidth(280)
+        self.drive_combo.currentTextChanged.connect(self._on_paths_updated)
         
         self.refresh_btn = QPushButton("Refresh Drives")
         self.refresh_btn.setFixedWidth(110)
@@ -57,6 +59,8 @@ class DriveSelectorWidget(QGroupBox):
         target_label.setFixedWidth(110)
         self.target_input = QLineEdit()
         self.target_input.setPlaceholderText("Select target destination folder...")
+        self.target_input.textChanged.connect(self._on_paths_updated)
+        
         self.browse_btn = QPushButton("Browse Target...")
         self.browse_btn.setFixedWidth(120)
         self.browse_btn.clicked.connect(self._browse_target_folder)
@@ -76,7 +80,7 @@ class DriveSelectorWidget(QGroupBox):
         opts_layout.addWidget(suffix_label)
         opts_layout.addWidget(self.suffix_input, 1)
 
-        opts_layout.addSpacing(20)
+        opts_layout.addSpacing(15)
 
         self.dcim_cb = QCheckBox("DCIM/")
         self.dcim_cb.setChecked(True)
@@ -85,15 +89,28 @@ class DriveSelectorWidget(QGroupBox):
         self.full_vol_cb = QCheckBox("Full Folder / Volume")
         self.full_vol_cb.setChecked(False)
 
+        self.move_cb = QCheckBox("🚚 Move files (Instant organize)")
+        self.move_cb.setChecked(False)
+        self.move_cb.setEnabled(False)
+        self.move_cb.setToolTip("Move mode is only available when source and target are on the same drive.")
+
         self.dcim_cb.stateChanged.connect(self._on_options_changed)
         self.private_cb.stateChanged.connect(self._on_options_changed)
         self.full_vol_cb.stateChanged.connect(self._on_full_vol_changed)
+        self.move_cb.stateChanged.connect(self._on_options_changed)
 
         opts_layout.addWidget(self.dcim_cb)
         opts_layout.addWidget(self.private_cb)
         opts_layout.addWidget(self.full_vol_cb)
+        opts_layout.addWidget(self.move_cb)
 
         main_layout.addLayout(opts_layout)
+
+        # 4. Same Drive Status Indicator Banner
+        self.same_drive_info = QLabel("⚡ Same drive detected: Instant 0-byte Move Mode available.")
+        self.same_drive_info.setStyleSheet("color: #00FFF5; font-size: 11px; font-weight: bold; margin-left: 115px;")
+        self.same_drive_info.hide()
+        main_layout.addWidget(self.same_drive_info)
 
     def refresh_drives(self):
         """Enumerates connected drives and updates QComboBox."""
@@ -114,6 +131,8 @@ class DriveSelectorWidget(QGroupBox):
         if current_text:
             self.set_selected_source_path(current_text)
 
+        self.update_move_mode_availability()
+
     def _browse_source_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Source Directory / SD Folder")
         if folder:
@@ -128,6 +147,26 @@ class DriveSelectorWidget(QGroupBox):
             self.target_input.setText(norm_f)
             self.target_changed.emit(norm_f)
 
+    def _on_paths_updated(self):
+        self.update_move_mode_availability()
+
+    def update_move_mode_availability(self):
+        """Auto-detects if source and target share the same drive volume."""
+        src = self.get_selected_drive_path()
+        tgt = self.get_target_directory()
+
+        if src and tgt and is_same_drive(src, tgt):
+            self.move_cb.setEnabled(True)
+            self.move_cb.setToolTip("Instant same-drive file pointer organization (0-byte move). Original file is moved.")
+            if not self.move_cb.property("user_toggled"):
+                self.move_cb.setChecked(True)
+            self.same_drive_info.show()
+        else:
+            self.move_cb.setEnabled(False)
+            self.move_cb.setChecked(False)
+            self.move_cb.setToolTip("Move mode is only available when source and destination are on the same drive.")
+            self.same_drive_info.hide()
+
     def _on_full_vol_changed(self, state):
         if self.full_vol_cb.isChecked():
             self.dcim_cb.setEnabled(False)
@@ -138,6 +177,8 @@ class DriveSelectorWidget(QGroupBox):
         self._on_options_changed()
 
     def _on_options_changed(self):
+        if self.sender() == self.move_cb:
+            self.move_cb.setProperty("user_toggled", True)
         self.options_changed.emit(self.get_selected_options())
 
     def set_selected_source_path(self, path_str: str):
@@ -145,14 +186,14 @@ class DriveSelectorWidget(QGroupBox):
         if not path_str:
             return
         norm_p = normalize_win_path(path_str)
-        # Check if already in combo item data
         for i in range(self.drive_combo.count()):
             if self.drive_combo.itemData(i) == norm_p or self.drive_combo.itemText(i) == norm_p:
                 self.drive_combo.setCurrentIndex(i)
+                self.update_move_mode_availability()
                 return
-        # Add as custom entry
         self.drive_combo.addItem(f"📁 {norm_p}", norm_p)
         self.drive_combo.setCurrentIndex(self.drive_combo.count() - 1)
+        self.update_move_mode_availability()
 
     def get_selected_drive_path(self) -> str:
         data = self.drive_combo.currentData()
@@ -167,9 +208,13 @@ class DriveSelectorWidget(QGroupBox):
     def get_custom_suffix(self) -> str:
         return self.suffix_input.text().strip()
 
+    def get_is_move_mode(self) -> bool:
+        return self.move_cb.isEnabled() and self.move_cb.isChecked()
+
     def get_selected_options(self) -> dict:
         return {
             "dcim": self.dcim_cb.isChecked(),
             "private": self.private_cb.isChecked(),
-            "full_volume": self.full_vol_cb.isChecked()
+            "full_volume": self.full_vol_cb.isChecked(),
+            "move_mode": self.get_is_move_mode()
         }

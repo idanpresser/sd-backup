@@ -1,7 +1,7 @@
 """
 Multi-Threaded Backup Worker for SD-FastBackup.
 Orchestrates volume scanning, metadata extraction, deduplication, SQLite cataloging, 
-FastCopy staging execution, real-time stdout progress parsing, and same-volume file renaming.
+FastCopy staging execution (or instant Same-Drive Move Mode), and same-volume file renaming with collision avoidance.
 """
 import os
 import time
@@ -45,7 +45,8 @@ class BackupWorker(QThread):
         target_dir: str, 
         fastcopy_path: str = "", 
         custom_suffix: str = "", 
-        folder_opts: Optional[Dict[str, bool]] = None
+        folder_opts: Optional[Dict[str, bool]] = None,
+        move_mode: bool = False
     ):
         super().__init__()
         self.source_path = normalize_win_path(os.path.abspath(source_card_path))
@@ -53,6 +54,7 @@ class BackupWorker(QThread):
         self.fastcopy_path = fastcopy_path
         self.custom_suffix = custom_suffix
         self.folder_opts = folder_opts or {"dcim": True, "private": True, "full_volume": False}
+        self.move_mode = move_mode
         self.signals = WorkerSignals()
         self._is_cancelled = False
 
@@ -61,9 +63,10 @@ class BackupWorker(QThread):
             db = DatabaseManager(self.target_dir)
             fastcopy = FastCopyRunner(self.fastcopy_path)
 
-            # Staging directory on target drive for fastcopy batching
+            # Staging directory on target drive for fastcopy batching (if in copy mode)
             staging_dir = os.path.join(self.target_dir, ".sd_staging")
-            os.makedirs(staging_dir, exist_ok=True)
+            if not self.move_mode:
+                os.makedirs(staging_dir, exist_ok=True)
 
             # 1. Register Volume Info
             vol_info = get_drive_volume_info(self.source_path)
@@ -139,49 +142,69 @@ class BackupWorker(QThread):
                     files_to_copy.append((norm_file_path, target_destination, composite_hash, size, rel_path))
                     total_copy_bytes += size
 
-            # 4. FastCopy Batch Staging Transfer Phase
+            # 4. Transfer / Move Execution Phase
             copied_count = 0
             if files_to_copy and not self._is_cancelled:
                 total_copy_files = len(files_to_copy)
                 self.signals.transfer_started.emit(total_copy_files, float(total_copy_bytes))
                 
-                source_paths = [item[0] for item in files_to_copy]
+                if self.move_mode:
+                    # Instant Same-Drive Move Mode (0-byte file pointer update, bypass FastCopy staging)
+                    self.signals.transfer_line.emit("🚚 Instant Same-Drive Move Mode active (0-byte pointer organize)...")
+                    for idx, (src_p, final_dst_p, h_val, f_size, rel_p) in enumerate(files_to_copy, start=1):
+                        if self._is_cancelled:
+                            db.checkpoint()
+                            return
 
-                # FastCopy copies files into staging_dir at top speed
-                for output_line in fastcopy.execute_manifest_copy(source_paths, staging_dir):
-                    if self._is_cancelled:
-                        self._cleanup_staging(staging_dir)
-                        db.checkpoint()
-                        return
-                    
-                    self.signals.transfer_line.emit(output_line)
+                        resolved_dst_p = resolve_target_path_collision(final_dst_p)
+                        os.makedirs(os.path.dirname(resolved_dst_p), exist_ok=True)
 
-                    # Real-time stdout metrics parsing (bytes written, speed MB/s, active file)
-                    metrics = parse_fastcopy_stdout_line(output_line)
-                    if metrics:
-                        self.signals.transfer_metrics.emit(metrics)
+                        if os.path.exists(src_p):
+                            shutil.move(src_p, resolved_dst_p)
 
-                # 5. Instant Same-Volume Move & Rename Phase
-                for idx, (src_p, final_dst_p, h_val, f_size, rel_p) in enumerate(files_to_copy, start=1):
-                    if self._is_cancelled:
-                        self._cleanup_staging(staging_dir)
-                        db.checkpoint()
-                        return
+                        db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
+                        copied_count += 1
+                        fname = os.path.basename(resolved_dst_p)
+                        self.signals.transfer_line.emit(f"⚡ Moved: {fname}")
+                        self.signals.transfer_progress.emit(copied_count, total_copy_files, fname, 100)
 
-                    orig_name = os.path.basename(src_p)
-                    staged_file_path = os.path.join(staging_dir, orig_name)
+                else:
+                    # Standard FastCopy Batch Staging Transfer Phase
+                    source_paths = [item[0] for item in files_to_copy]
 
-                    resolved_dst_p = resolve_target_path_collision(final_dst_p)
-                    os.makedirs(os.path.dirname(resolved_dst_p), exist_ok=True)
+                    for output_line in fastcopy.execute_manifest_copy(source_paths, staging_dir):
+                        if self._is_cancelled:
+                            self._cleanup_staging(staging_dir)
+                            db.checkpoint()
+                            return
+                        
+                        self.signals.transfer_line.emit(output_line)
 
-                    if os.path.exists(staged_file_path):
-                        shutil.move(staged_file_path, resolved_dst_p)
-                    elif os.path.exists(src_p):
-                        shutil.copy2(src_p, resolved_dst_p)
+                        metrics = parse_fastcopy_stdout_line(output_line)
+                        if metrics:
+                            self.signals.transfer_metrics.emit(metrics)
 
-                    db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
-                    copied_count += 1
-                    self.signals.transfer_progress.emit(copied_count, total_copy_files, os.path.basename(resolved_dst_p), 100)
+                    # Same-Volume Rename Phase
+                    for idx, (src_p, final_dst_p, h_val, f_size, rel_p) in enumerate(files_to_copy, start=1):
+                        if self._is_cancelled:
+                            self._cleanup_staging(staging_dir)
+                            db.checkpoint()
+                            return
+
+                        orig_name = os.path.basename(src_p)
+                        staged_file_path = os.path.join(staging_dir, orig_name)
+
+                        resolved_dst_p = resolve_target_path_collision(final_dst_p)
+                        os.makedirs(os.path.dirname(resolved_dst_p), exist_ok=True)
+
+                        if os.path.exists(staged_file_path):
+                            shutil.move(staged_file_path, resolved_dst_p)
+                        elif os.path.exists(src_p):
+                            shutil.copy2(src_p, resolved_dst_p)
+
+                        db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
+                        copied_count += 1
+                        self.signals.transfer_progress.emit(copied_count, total_copy_files, os.path.basename(resolved_dst_p), 100)
 
             self._cleanup_staging(staging_dir)
 
