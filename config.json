@@ -1,9 +1,11 @@
 {
-  "target_directory": "D:/All_Media_Aug26",
+  "source_path": "F:\\DCIM",
+  "target_directory": "D:\\All_Media_Aug26",
   "custom_suffix": "IdanPresser(C)",
+  "fastcopy_path": "",
   "subfolder_options": {
     "dcim": true,
     "private": true,
-    "full_volume": false
+    "full_volume": true
   }
 }

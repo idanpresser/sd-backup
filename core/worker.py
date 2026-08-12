@@ -26,8 +26,8 @@ class WorkerSignals(QObject):
     """Signals emitted by BackupWorker across thread boundaries."""
     scan_started = Signal(str)                                # (scan_root_path)
     scan_progress = Signal(int, int, str)                      # (current_count, total_count, current_filename)
-    duplicate_found = Signal(str, str, int)                    # (filename, composite_hash, size_bytes)
-    transfer_started = Signal(int, int)                        # (total_copy_files, total_copy_bytes)
+    duplicate_found = Signal(str, str, float)                  # (filename, composite_hash, size_bytes - float to prevent 32-bit overflow)
+    transfer_started = Signal(int, float)                      # (total_copy_files, total_copy_bytes - float to prevent 32-bit overflow)
     transfer_progress = Signal(int, int, str, int)             # (copied_files, total_copy_files, current_filename, file_pct)
     transfer_line = Signal(str)                               # (stdout_output_line)
     read_error = Signal(str, str)                              # (file_path, error_details)
@@ -132,7 +132,7 @@ class BackupWorker(QThread):
                 # Deduplication Check
                 if db.is_file_copied(composite_hash):
                     duplicate_count += 1
-                    self.signals.duplicate_found.emit(file_basename, composite_hash, size)
+                    self.signals.duplicate_found.emit(file_basename, composite_hash, float(size))
                     db.update_transfer_status(composite_hash, norm_file_path, target_destination, 'DUPLICATE_SKIPPED')
                 else:
                     files_to_copy.append((norm_file_path, target_destination, composite_hash, size, rel_path))
@@ -142,7 +142,7 @@ class BackupWorker(QThread):
             copied_count = 0
             if files_to_copy and not self._is_cancelled:
                 total_copy_files = len(files_to_copy)
-                self.signals.transfer_started.emit(total_copy_files, total_copy_bytes)
+                self.signals.transfer_started.emit(total_copy_files, float(total_copy_bytes))
                 
                 source_paths = [item[0] for item in files_to_copy]
 
