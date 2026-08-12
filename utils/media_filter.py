@@ -8,9 +8,9 @@ import os
 import logging
 from typing import Optional
 
-# Layer 1: Blacklisted filenames and extensions (instant drop)
+# Layer 1: Blacklisted filenames and keywords (instant drop)
 SYSTEM_BLACKLIST_FILENAMES = {
-    "indexervolumeguid", "wpsettings.dat", "sonycard.ind", "desktop.ini",
+    "indexervolumeguid", "wpsettings", "sonycard.ind", "desktop.ini",
     "thumbs.db", ".ds_store", "pp-101.db", "index.bdm", "movieobj.bdm",
     "prv00001.bin", "avin0001.bnp", "avin0001.inp", "avin0001.int"
 }
@@ -45,8 +45,9 @@ def is_blacklisted_system_file(file_path: str) -> bool:
         return True
 
     base = os.path.basename(file_path).lower()
-    if base in SYSTEM_BLACKLIST_FILENAMES:
-        return True
+    for keyword in SYSTEM_BLACKLIST_FILENAMES:
+        if keyword in base:
+            return True
 
     ext = os.path.splitext(base)[1]
     if ext in SYSTEM_BLACKLIST_EXTENSIONS:
