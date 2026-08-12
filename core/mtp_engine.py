@@ -261,7 +261,7 @@ class MTPEngine:
         if not self.shell:
             return False
 
-        temp_dir = tempfile.mkdtemp(prefix="mtp_stage_")
+        temp_dir = os.path.abspath(tempfile.mkdtemp(prefix="mtp_stage_"))
         try:
             target_shell_dir = self.shell.NameSpace(temp_dir)
             if not target_shell_dir:
