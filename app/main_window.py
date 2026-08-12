@@ -20,6 +20,7 @@ from app.components.log_console import LogConsoleWidget
 from app.components.alert_banner import AlertBannerWidget
 from core.worker import BackupWorker
 from core.logger import QtSignalingLogHandler
+from core.mtp_engine import is_mtp_path
 from utils.path_formatter import normalize_win_path
 
 
@@ -52,7 +53,7 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout()
         title_label = QLabel("⚡ SD-FastBackup")
         title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #00ADB5;")
-        subtitle_label = QLabel("Ultra-Fast Deduplicated SD Card & Media Backup Engine")
+        subtitle_label = QLabel("Ultra-Fast Deduplicated SD Card & Mobile Phone (MTP) Backup Engine")
         subtitle_label.setStyleSheet("color: #888888; font-size: 12px; margin-left: 10px;")
 
         header_layout.addWidget(title_label)
@@ -145,7 +146,7 @@ class MainWindow(QMainWindow):
                     
                     src_p = cfg.get("source_path", "")
                     if src_p:
-                        self.drive_selector.set_selected_source_path(normalize_win_path(src_p))
+                        self.drive_selector.set_selected_source_path(src_p if is_mtp_path(src_p) else normalize_win_path(src_p))
                         
                     target_dir = cfg.get("target_directory", "")
                     if target_dir:
@@ -197,8 +198,12 @@ class MainWindow(QMainWindow):
         folder_opts = self.drive_selector.get_selected_options()
         is_move = self.drive_selector.get_is_move_mode()
 
-        if not source_location or not os.path.exists(source_location):
-            self.alert_banner.show_alert("Please select a valid source drive or folder.", level="ERROR")
+        if not source_location:
+            self.alert_banner.show_alert("Please select a valid source drive, mobile phone, or folder.", level="ERROR")
+            return
+
+        if not is_mtp_path(source_location) and not os.path.exists(source_location):
+            self.alert_banner.show_alert(f"Source location '{source_location}' does not exist.", level="ERROR")
             return
 
         if not target_dir:
@@ -255,7 +260,12 @@ class MainWindow(QMainWindow):
     def _on_transfer_started(self, total_files: int, total_bytes: float):
         self.progress_panel.reset_for_transfer(total_files, total_bytes)
         gb = total_bytes / (1024 ** 3)
-        mode_str = "Same-Drive Instant Move" if (self.worker and self.worker.move_mode) else "FastCopy Batch Transfer"
+        if self.worker and self.worker.is_mtp:
+            mode_str = "MTP Phone Stream Transfer"
+        elif self.worker and self.worker.move_mode:
+            mode_str = "Same-Drive Instant Move"
+        else:
+            mode_str = "FastCopy Batch Transfer"
         self.log_console.append_trace(f"🚀 {mode_str} phase started ({total_files} files, {gb:.2f} GB)")
 
     def _on_transfer_progress(self, copied_count: int, total_files: int, current_filename: str, file_pct: int):
@@ -268,7 +278,7 @@ class MainWindow(QMainWindow):
         self.log_console.append_trace(line)
 
     def _on_read_error(self, file_path: str, err_msg: str):
-        msg = f"Card Read Error on '{os.path.basename(file_path)}': {err_msg}"
+        msg = f"Read Error on '{os.path.basename(file_path)}': {err_msg}"
         self.alert_banner.show_alert(msg, level="WARNING")
 
     def _on_backup_finished(self, summary: dict):

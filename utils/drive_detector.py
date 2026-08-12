@@ -1,19 +1,24 @@
 """
 Drive detector utility for SD-FastBackup.
-Enumerates attached drives, removable media (SD cards), volume labels, serial numbers, and same-drive checks.
+Enumerates attached drives, removable media (SD cards), MTP mobile phone devices, volume labels, and same-drive checks.
 """
 import os
 import sys
 import ctypes
 import shutil
 from typing import List, Dict, Any
+from core.mtp_engine import MTPEngine
 
 
 def is_same_drive(path_a: str, path_b: str) -> bool:
     """
     Returns True if both paths reside on the same drive/volume root (e.g. both on C:\\ or both on D:\\).
+    MTP devices are never same-drive with local drives.
     """
     if not path_a or not path_b:
+        return False
+
+    if path_a.startswith("MTP:\\") or path_b.startswith("MTP:\\"):
         return False
 
     abs_a = os.path.abspath(path_a)
@@ -25,7 +30,6 @@ def is_same_drive(path_a: str, path_b: str) -> bool:
     if drive_a and drive_b:
         return drive_a.upper() == drive_b.upper()
 
-    # On POSIX / Linux / macOS, compare mount points or root dirs
     return os.path.dirname(abs_a) == os.path.dirname(abs_b) or abs_a.split(os.sep)[1:2] == abs_b.split(os.sep)[1:2]
 
 
@@ -38,6 +42,10 @@ def get_drive_volume_info(drive_path: str) -> Dict[str, str]:
 
     if not drive_path:
         return {"label": label, "serial": serial}
+
+    if drive_path.startswith("MTP:\\"):
+        dev_name = drive_path.replace("MTP:\\", "")
+        return {"label": dev_name, "serial": f"MTP_{abs(hash(dev_name)) % 100000000:08X}"}
 
     drive_root = drive_path.rstrip("\\") + "\\"
 
@@ -76,7 +84,7 @@ def get_drive_volume_info(drive_path: str) -> Dict[str, str]:
 def get_available_drives() -> List[Dict[str, Any]]:
     """
     Returns list of connected drive information dicts:
-    [{'path': 'E:\\', 'label': 'SD_CARD', 'drive_type': 'Removable', 'free_bytes': ..., 'total_bytes': ...}]
+    Includes standard Drive Letters (E:\\, F:\\) AND MTP Mobile Phone Devices (Pixel 8, iPhone).
     """
     drives = []
 
@@ -110,6 +118,15 @@ def get_available_drives() -> List[Dict[str, Any]]:
                     })
         except Exception:
             pass
+
+        # 2. Add connected MTP Mobile Phone Devices
+        try:
+            mtp_engine = MTPEngine()
+            mtp_devs = mtp_engine.get_mtp_devices()
+            drives.extend(mtp_devs)
+        except Exception:
+            pass
+
     else:
         test_paths = ["/Volumes", "/media", "/mnt", "."]
         for p in test_paths:
