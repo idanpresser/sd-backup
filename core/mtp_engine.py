@@ -1,7 +1,7 @@
 """
-Windows Shell COM MTP Driver for SD-FastBackup.
-Provides MTP (Media Transfer Protocol) device detection, virtual directory traversal, 
-metadata extraction, stream copying, and thread-safe COM CoInitialize for smartphones (Android & iPhone).
+Windows Shell COM MTP & PTP Driver for SD-FastBackup.
+Provides MTP/PTP (Media & Picture Transfer Protocol) device detection, virtual directory traversal, 
+metadata extraction, stream copying, and subfolder fallback resolution for smartphones (Android & iPhone).
 """
 import os
 import sys
@@ -63,14 +63,14 @@ def parse_mtp_subfolder_path(path_str: str) -> str:
 
 
 class MTPEngine:
-    """Windows Shell COM engine for browsing and transferring MTP phone media."""
+    """Windows Shell COM engine for browsing and transferring MTP/PTP phone media."""
 
     def __init__(self):
         _ensure_coinitialize()
         self.shell = win32com.client.Dispatch("Shell.Application") if HAS_WIN32COM else None
 
     def get_mtp_devices(self) -> List[Dict[str, Any]]:
-        """Enumerates connected MTP devices under 'This PC' (Shell Namespace 17)."""
+        """Enumerates connected MTP/PTP devices under 'This PC' (Shell Namespace 17)."""
         _ensure_coinitialize()
         devices = []
         if not self.shell:
@@ -88,7 +88,7 @@ class MTPEngine:
                     is_usb_guid = "\\\\?\\usb#" in item_path.lower() or "\\\\?\\wce#" in item_path.lower()
                     is_mobile_type = any(kw in item_type.lower() for kw in [
                         "mobile", "phone", "portable", "camera", "media player", 
-                        "mtp", "iphone", "android", "pixel", "galaxy", "oppo"
+                        "mtp", "ptp", "iphone", "android", "pixel", "galaxy", "oppo"
                     ])
 
                     if item.IsFolder and not is_standard_drive and (is_usb_guid or is_mobile_type or item_path.startswith("::{")):
@@ -131,17 +131,19 @@ class MTPEngine:
         full_volume: bool = False
     ) -> List[Dict[str, Any]]:
         """
-        Traverses MTP device media directories (Internal storage/DCIM, PRIVATE, etc.)
+        Traverses MTP/PTP device media directories (Internal storage/DCIM, Pictures, etc.)
         and returns file dicts:
         [{'file_item': shell_item, 'name': fname, 'rel_path': rel_path, 'size': size_bytes, 'date_taken': datetime_obj}]
         """
         _ensure_coinitialize()
         file_list = []
-        target_folder = self._get_device_root_folder(device_name)
-        if not target_folder:
+        root_folder = self._get_device_root_folder(device_name)
+        if not root_folder:
             return file_list
 
-        # If subfolder_path is specified (e.g. 'Internal shared storage' or 'Internal storage/DCIM'), navigate into it
+        target_folder = root_folder
+
+        # If subfolder_path is specified, navigate into it
         if subfolder_path:
             sub_parts = subfolder_path.replace("/", "\\").split("\\")
             for part in sub_parts:
@@ -162,7 +164,14 @@ class MTPEngine:
                     logging.warning(f"MTP subfolder part '{part}' not found in '{device_name}'")
                     break
 
+        # 1. Primary traversal
         self._traverse_folder(target_folder, "", file_list, include_dcim, include_private, full_volume)
+
+        # 2. Fallback to device root traversal if 0 files found and subfolder_path was specified
+        if not file_list and subfolder_path and root_folder != target_folder:
+            logging.info(f"0 files found in subfolder '{subfolder_path}'. Falling back to root device traversal...")
+            self._traverse_folder(root_folder, "", file_list, include_dcim=True, include_private=True, full_volume=True)
+
         return file_list
 
     def _traverse_folder(
@@ -285,7 +294,7 @@ def browse_with_windows_shell(hwnd: int = 0) -> Optional[str]:
 
     try:
         shell = win32com.client.Dispatch("Shell.Application")
-        folder = shell.BrowseForFolder(hwnd, "Select Source Drive, Folder, or Mobile Phone (MTP)", 0, 17)
+        folder = shell.BrowseForFolder(hwnd, "Select Source Drive, Folder, or Mobile Phone (MTP/PTP)", 0, 17)
         if folder:
             item_path = str(folder.Self.Path)
 

@@ -106,9 +106,13 @@ class BackupWorker(QThread):
 
         total_files = len(mtp_files)
         if total_files == 0:
-            err_msg = "0 media files found. Please UNLOCK your phone screen and ensure USB mode is set to 'File Transfer / MTP' on your phone."
-            self.signals.read_error.emit(display_name, err_msg)
-            self.signals.transfer_line.emit(f"⚠️ MTP Access Warning for '{display_name}': {err_msg}")
+            guidance = (
+                f"0 media files returned by Windows for '{display_name}'. "
+                "Try unlocking your phone, switching USB mode on your phone to 'Photos (PTP)', "
+                "and checking 'Full Storage' in SD-FastBackup."
+            )
+            self.signals.read_error.emit(display_name, guidance)
+            self.signals.transfer_line.emit(f"⚠️ MTP / PTP Notice: {guidance}")
             self.signals.finished.emit({'scanned': 0, 'duplicates': 0, 'copied': 0, 'bytes': 0})
             db.checkpoint()
             return
