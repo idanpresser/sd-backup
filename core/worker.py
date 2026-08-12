@@ -14,7 +14,7 @@ from PySide6.QtCore import QThread, Signal, QObject
 from core.metadata import MetadataExtractor
 from core.db import DatabaseManager
 from core.fastcopy import FastCopyRunner, parse_fastcopy_stdout_line
-from core.mtp_engine import MTPEngine, is_mtp_path, parse_mtp_device_name
+from core.mtp_engine import MTPEngine, is_mtp_path, parse_mtp_device_name, parse_mtp_subfolder_path
 from utils.path_formatter import (
     filter_source_files, 
     format_full_target_path, 
@@ -84,15 +84,18 @@ class BackupWorker(QThread):
         """Engine B: MTP Mobile Phone Transfer Pipeline (Android & iPhone)."""
         mtp_engine = MTPEngine()
         dev_name = parse_mtp_device_name(self.source_path)
+        subfolder_path = parse_mtp_subfolder_path(self.source_path)
 
         vol_info = get_drive_volume_info(self.source_path)
         db.register_volume(vol_info["serial"], vol_info["label"])
 
-        self.signals.scan_started.emit(f"MTP Device: {dev_name}")
-        self.signals.transfer_line.emit(f"📱 Traversing MTP Phone Virtual Storage: '{dev_name}'...")
+        display_name = f"{dev_name}\\{subfolder_path}" if subfolder_path else dev_name
+        self.signals.scan_started.emit(f"MTP Device: {display_name}")
+        self.signals.transfer_line.emit(f"📱 Traversing MTP Phone Storage: '{display_name}'...")
 
         mtp_files = mtp_engine.enumerate_mtp_files(
             dev_name,
+            subfolder_path=subfolder_path,
             include_dcim=self.folder_opts.get("dcim", True),
             include_private=self.folder_opts.get("private", True),
             full_volume=self.folder_opts.get("full_volume", False)
@@ -184,11 +187,9 @@ class BackupWorker(QThread):
         if not self.move_mode:
             os.makedirs(staging_dir, exist_ok=True)
 
-        # 1. Register Volume Info
         vol_info = get_drive_volume_info(self.source_path)
         db.register_volume(vol_info["serial"], vol_info["label"])
 
-        # 2. Discover Source Files
         source_files = filter_source_files(
             self.source_path,
             include_dcim=self.folder_opts.get("dcim", True),
@@ -211,7 +212,6 @@ class BackupWorker(QThread):
         duplicate_count = 0
         read_error_count = 0
 
-        # 3. Scanning & Deduplication Phase
         for idx, file_path in enumerate(source_files, start=1):
             if self._is_cancelled:
                 self._cleanup_staging(staging_dir)
@@ -254,7 +254,6 @@ class BackupWorker(QThread):
                 files_to_copy.append((norm_file_path, target_destination, composite_hash, size, rel_path))
                 total_copy_bytes += size
 
-        # 4. Transfer / Move Execution Phase
         copied_count = 0
         if files_to_copy and not self._is_cancelled:
             total_copy_files = len(files_to_copy)

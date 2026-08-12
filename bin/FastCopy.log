@@ -2378,3 +2378,139 @@ Usage: fcp.exe
 
     from_file_or_dir  [/to=dest_dir]
 
+=================================================
+fcp(ver5.11.3) start at 2026/08/12 23:08:03
+Illegal Command: /utf8 is not recognized.
+
+Usage: fcp.exe
+    [/cmd=(diff | noexist_only | update | force_copy | exist_diff | exist_update | sync | sync_update | move | move_noexist | delete | verify | verify_read | verify_check)]
+
+    [/include="..."] [/exclude="..."]
+    [/from_date="..."] [/to_date="..."]
+    [/min_size="..."] [/max_size="..."]
+
+    [/srcfile=pathlist_file] [/srcfile_w=unicode_pathlist_file]
+    [/speed=(full|autoslow|9-1|suspend)] [/auto_slow] [/low_io]
+
+    [/auto_close] [/force_close] [/open_window]
+    [/error_stop] [/no_exec] [/force_start[=N]]
+    [/balloon[=true|false]]
+    [/no_ui] [/no_confirm_del] [/no_confirm_stop]
+    [/ini=fname]
+
+    [/acl] [/stream] [/reparse] [/verify]
+    [/linkdest] [/recreate]
+    [/wipe_del] [/skip_empty_dir]
+
+    [/dlsvt=(none|auto|always)]
+    [/verifyinfo]
+    [/time_allow=N(ms)]
+    [/disk_mode=(diff|same|auto)]
+    [/bufsize=N(MB)] [/estimate]
+    [/log] [/filelog] [/logfile=fname] [/utf8]
+    [/job=jobname] [/postproc=postproc_name]
+
+    from_file_or_dir  [/to=dest_dir]
+
+=================================================
+fcp(ver5.11.3) start at 2026/08/12 23:08:03
+Illegal Command: /utf8 is not recognized.
+
+Usage: fcp.exe
+    [/cmd=(diff | noexist_only | update | force_copy | exist_diff | exist_update | sync | sync_update | move | move_noexist | delete | verify | verify_read | verify_check)]
+
+    [/include="..."] [/exclude="..."]
+    [/from_date="..."] [/to_date="..."]
+    [/min_size="..."] [/max_size="..."]
+
+    [/srcfile=pathlist_file] [/srcfile_w=unicode_pathlist_file]
+    [/speed=(full|autoslow|9-1|suspend)] [/auto_slow] [/low_io]
+
+    [/auto_close] [/force_close] [/open_window]
+    [/error_stop] [/no_exec] [/force_start[=N]]
+    [/balloon[=true|false]]
+    [/no_ui] [/no_confirm_del] [/no_confirm_stop]
+    [/ini=fname]
+
+    [/acl] [/stream] [/reparse] [/verify]
+    [/linkdest] [/recreate]
+    [/wipe_del] [/skip_empty_dir]
+
+    [/dlsvt=(none|auto|always)]
+    [/verifyinfo]
+    [/time_allow=N(ms)]
+    [/disk_mode=(diff|same|auto)]
+    [/bufsize=N(MB)] [/estimate]
+    [/log] [/filelog] [/logfile=fname] [/utf8]
+    [/job=jobname] [/postproc=postproc_name]
+
+    from_file_or_dir  [/to=dest_dir]
+
+=================================================
+fcp(ver5.11.3) start at 2026/08/12 23:08:04
+Illegal Command: /utf8 is not recognized.
+
+Usage: fcp.exe
+    [/cmd=(diff | noexist_only | update | force_copy | exist_diff | exist_update | sync | sync_update | move | move_noexist | delete | verify | verify_read | verify_check)]
+
+    [/include="..."] [/exclude="..."]
+    [/from_date="..."] [/to_date="..."]
+    [/min_size="..."] [/max_size="..."]
+
+    [/srcfile=pathlist_file] [/srcfile_w=unicode_pathlist_file]
+    [/speed=(full|autoslow|9-1|suspend)] [/auto_slow] [/low_io]
+
+    [/auto_close] [/force_close] [/open_window]
+    [/error_stop] [/no_exec] [/force_start[=N]]
+    [/balloon[=true|false]]
+    [/no_ui] [/no_confirm_del] [/no_confirm_stop]
+    [/ini=fname]
+
+    [/acl] [/stream] [/reparse] [/verify]
+    [/linkdest] [/recreate]
+    [/wipe_del] [/skip_empty_dir]
+
+    [/dlsvt=(none|auto|always)]
+    [/verifyinfo]
+    [/time_allow=N(ms)]
+    [/disk_mode=(diff|same|auto)]
+    [/bufsize=N(MB)] [/estimate]
+    [/log] [/filelog] [/logfile=fname] [/utf8]
+    [/job=jobname] [/postproc=postproc_name]
+
+    from_file_or_dir  [/to=dest_dir]
+
+=================================================
+fcp(ver5.11.3) start at 2026/08/12 23:08:05
+Illegal Command: /utf8 is not recognized.
+
+Usage: fcp.exe
+    [/cmd=(diff | noexist_only | update | force_copy | exist_diff | exist_update | sync | sync_update | move | move_noexist | delete | verify | verify_read | verify_check)]
+
+    [/include="..."] [/exclude="..."]
+    [/from_date="..."] [/to_date="..."]
+    [/min_size="..."] [/max_size="..."]
+
+    [/srcfile=pathlist_file] [/srcfile_w=unicode_pathlist_file]
+    [/speed=(full|autoslow|9-1|suspend)] [/auto_slow] [/low_io]
+
+    [/auto_close] [/force_close] [/open_window]
+    [/error_stop] [/no_exec] [/force_start[=N]]
+    [/balloon[=true|false]]
+    [/no_ui] [/no_confirm_del] [/no_confirm_stop]
+    [/ini=fname]
+
+    [/acl] [/stream] [/reparse] [/verify]
+    [/linkdest] [/recreate]
+    [/wipe_del] [/skip_empty_dir]
+
+    [/dlsvt=(none|auto|always)]
+    [/verifyinfo]
+    [/time_allow=N(ms)]
+    [/disk_mode=(diff|same|auto)]
+    [/bufsize=N(MB)] [/estimate]
+    [/log] [/filelog] [/logfile=fname] [/utf8]
+    [/job=jobname] [/postproc=postproc_name]
+
+    from_file_or_dir  [/to=dest_dir]
+

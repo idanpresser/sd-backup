@@ -1,7 +1,7 @@
 """
 Windows Shell COM MTP Driver for SD-FastBackup.
 Provides MTP (Media Transfer Protocol) device detection, virtual directory traversal, 
-metadata extraction, and stream copying for smartphones (Android & iPhone).
+metadata extraction, stream copying, and subfolder resolution for smartphones (Android & iPhone).
 """
 import os
 import sys
@@ -28,15 +28,28 @@ def is_mtp_path(path_str: str) -> bool:
     return norm.startswith("MTP:\\") or norm.startswith("shell:MTP\\")
 
 
-def parse_mtp_device_name(path_str: str) -> str:
-    """Extracts device name from MTP virtual path e.g. 'MTP:\\Pixel 8 Pro\\DCIM' -> 'Pixel 8 Pro'."""
+def _get_mtp_path_components(path_str: str) -> List[str]:
+    """Strips MTP:\\ prefix and splits path into non-empty components."""
     if not is_mtp_path(path_str):
+        return []
+    cleaned = path_str.replace("shell:MTP\\", "").replace("MTP:\\", "").strip("\\")
+    return [p for p in cleaned.split("\\") if p]
+
+
+def parse_mtp_device_name(path_str: str) -> str:
+    """Extracts device name from MTP virtual path e.g. 'MTP:\\Pixel 8 Pro\\Internal shared storage' -> 'Pixel 8 Pro'."""
+    parts = _get_mtp_path_components(path_str)
+    if not parts:
         return ""
-    norm = path_str.replace("/", "\\")
-    parts = norm.split("\\")
-    if len(parts) >= 2:
-        return parts[1]
-    return ""
+    return parts[0]
+
+
+def parse_mtp_subfolder_path(path_str: str) -> str:
+    """Extracts subfolder path after device name e.g. 'MTP:\\Pixel 8 Pro\\Internal shared storage\\DCIM' -> 'Internal shared storage\\DCIM'."""
+    parts = _get_mtp_path_components(path_str)
+    if len(parts) <= 1:
+        return ""
+    return os.path.join(*parts[1:])
 
 
 class MTPEngine:
@@ -63,7 +76,7 @@ class MTPEngine:
                     is_usb_guid = "\\\\?\\usb#" in item_path.lower() or "\\\\?\\wce#" in item_path.lower()
                     is_mobile_type = any(kw in item_type.lower() for kw in [
                         "mobile", "phone", "portable", "camera", "media player", 
-                        "mtp", "iphone", "android", "pixel", "galaxy"
+                        "mtp", "iphone", "android", "pixel", "galaxy", "oppo"
                     ])
 
                     if item.IsFolder and not is_standard_drive and (is_usb_guid or is_mobile_type or item_path.startswith("::{")):
@@ -99,6 +112,7 @@ class MTPEngine:
     def enumerate_mtp_files(
         self, 
         device_name: str, 
+        subfolder_path: str = "",
         include_dcim: bool = True, 
         include_private: bool = True, 
         full_volume: bool = False
@@ -109,11 +123,32 @@ class MTPEngine:
         [{'file_item': shell_item, 'name': fname, 'rel_path': rel_path, 'size': size_bytes, 'date_taken': datetime_obj}]
         """
         file_list = []
-        dev_folder = self._get_device_root_folder(device_name)
-        if not dev_folder:
+        target_folder = self._get_device_root_folder(device_name)
+        if not target_folder:
             return file_list
 
-        self._traverse_folder(dev_folder, "", file_list, include_dcim, include_private, full_volume)
+        # If subfolder_path is specified (e.g. 'Internal shared storage' or 'Internal storage/DCIM'), navigate into it
+        if subfolder_path:
+            sub_parts = subfolder_path.replace("/", "\\").split("\\")
+            for part in sub_parts:
+                if not part:
+                    continue
+                found_sub = None
+                try:
+                    for item in target_folder.Items():
+                        if item.IsFolder and str(item.Name).lower() == part.lower():
+                            found_sub = item.GetFolder
+                            break
+                except Exception:
+                    pass
+
+                if found_sub:
+                    target_folder = found_sub
+                else:
+                    logging.warning(f"MTP subfolder part '{part}' not found in '{device_name}'")
+                    break
+
+        self._traverse_folder(target_folder, "", file_list, include_dcim, include_private, full_volume)
         return file_list
 
     def _traverse_folder(
@@ -225,9 +260,9 @@ class MTPEngine:
 
 def browse_with_windows_shell(hwnd: int = 0) -> Optional[str]:
     """
-    Spawns Windows Shell BrowseForFolder dialog allowing selection of MTP devices (Pixel 8 Pro, iPhone)
-    or standard local drive folders.
-    Returns MTP:\\DeviceName or local directory path.
+    Spawns Windows Shell BrowseForFolder dialog allowing selection of MTP devices (Pixel 8 Pro, iPhone, OPPO)
+    or subfolders (Internal shared storage) or standard local drive folders.
+    Reconstructs MTP:\\DeviceName\\SubFolder.
     """
     if not HAS_WIN32COM:
         return None
@@ -236,14 +271,32 @@ def browse_with_windows_shell(hwnd: int = 0) -> Optional[str]:
         shell = win32com.client.Dispatch("Shell.Application")
         folder = shell.BrowseForFolder(hwnd, "Select Source Drive, Folder, or Mobile Phone (MTP)", 0, 17)
         if folder:
-            title = str(folder.Title)
             item_path = str(folder.Self.Path)
 
             if not os.path.exists(item_path) or item_path.startswith("::{"):
-                name = str(folder.Self.Name)
-                return f"MTP:\\{name}"
+                # Walk up parent chain to resolve device name and subfolder path
+                path_parts = []
+                curr = folder
+                
+                while curr and hasattr(curr, "Title"):
+                    title = str(curr.Title)
+                    # Check if curr is This PC
+                    if title.lower() in ["this pc", "computer", "my computer"]:
+                        break
+                    path_parts.insert(0, str(curr.Self.Name) if hasattr(curr, "Self") else title)
+                    
+                    try:
+                        curr = curr.ParentFolder
+                    except Exception:
+                        break
+
+                if path_parts:
+                    mtp_str = "\\".join(path_parts)
+                    return f"MTP:\\{mtp_str}"
+                else:
+                    return f"MTP:\\{str(folder.Self.Name)}"
             else:
-                return normalize_win_path(item_path)
+                return os.path.normpath(item_path)
     except Exception as e:
         logging.warning(f"Shell BrowseForFolder notice: {e}")
 
