@@ -1,7 +1,6 @@
 {
-  "fastcopy_path": "",
-  "custom_suffix": "",
-  "target_directory": "",
+  "target_directory": "D:/All_Media_Aug26",
+  "custom_suffix": "IdanPresser(C)",
   "subfolder_options": {
     "dcim": true,
     "private": true,

@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QMessageBox, QApplication
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
 
 from app.components.drive_selector import DriveSelectorWidget
 from app.components.progress_panel import ProgressPanelWidget
@@ -21,6 +20,7 @@ from app.components.log_console import LogConsoleWidget
 from app.components.alert_banner import AlertBannerWidget
 from core.worker import BackupWorker
 from core.logger import QtSignalingLogHandler
+from utils.path_formatter import normalize_win_path
 
 
 class MainWindow(QMainWindow):
@@ -29,11 +29,12 @@ class MainWindow(QMainWindow):
     def __init__(self, config_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("SD-FastBackup")
-        self.resize(950, 720)
-        self.setMinimumSize(800, 600)
+        self.resize(980, 750)
+        self.setMinimumSize(850, 620)
 
         self.config_path = config_path or os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
         self.worker: Optional[BackupWorker] = None
+        self.fastcopy_path = ""
 
         self._init_ui()
         self._setup_logging()
@@ -51,7 +52,7 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout()
         title_label = QLabel("⚡ SD-FastBackup")
         title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #00ADB5;")
-        subtitle_label = QLabel("Ultra-Fast Deduplicated SD Card Backup System")
+        subtitle_label = QLabel("Ultra-Fast Deduplicated SD Card & Media Backup Engine")
         subtitle_label.setStyleSheet("color: #888888; font-size: 12px; margin-left: 10px;")
 
         header_layout.addWidget(title_label)
@@ -70,7 +71,6 @@ class MainWindow(QMainWindow):
         action_layout = QHBoxLayout()
 
         self.start_btn = QPushButton("🚀 START BACKUP")
-        self.start_btn.setHeight = 42
         self.start_btn.setStyleSheet("""
             QPushButton {
                 background-color: #00ADB5;
@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
         self.progress_panel = ProgressPanelWidget(self)
         main_layout.addWidget(self.progress_panel)
 
-        # 6. Log Console Console
+        # 6. Log Console Widget
         self.log_console = LogConsoleWidget(self)
         main_layout.addWidget(self.log_console, 1)
 
@@ -137,17 +137,34 @@ class MainWindow(QMainWindow):
         self.log_console.append_trace(f"[{level}] {message}")
 
     def load_config(self):
-        """Loads preferences from config.json."""
+        """Loads preferences from config.json and populates UI fields."""
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
+                    
+                    src_p = cfg.get("source_path", "")
+                    if src_p:
+                        self.drive_selector.set_selected_source_path(normalize_win_path(src_p))
+                        
                     target_dir = cfg.get("target_directory", "")
                     if target_dir:
-                        self.drive_selector.target_input.setText(target_dir)
+                        self.drive_selector.target_input.setText(normalize_win_path(target_dir))
+                        
                     suffix = cfg.get("custom_suffix", "")
                     if suffix:
                         self.drive_selector.suffix_input.setText(suffix)
+
+                    self.fastcopy_path = cfg.get("fastcopy_path", "")
+
+                    sub_opts = cfg.get("subfolder_options", {})
+                    if "dcim" in sub_opts:
+                        self.drive_selector.dcim_cb.setChecked(sub_opts["dcim"])
+                    if "private" in sub_opts:
+                        self.drive_selector.private_cb.setChecked(sub_opts["private"])
+                    if "full_volume" in sub_opts:
+                        self.drive_selector.full_vol_cb.setChecked(sub_opts["full_volume"])
+                        
             except Exception as e:
                 logging.warning(f"Could not load config file: {e}")
 
@@ -155,8 +172,10 @@ class MainWindow(QMainWindow):
         """Saves current GUI preferences to config.json."""
         try:
             cfg = {
+                "source_path": self.drive_selector.get_selected_drive_path(),
                 "target_directory": self.drive_selector.get_target_directory(),
                 "custom_suffix": self.drive_selector.get_custom_suffix(),
+                "fastcopy_path": self.fastcopy_path,
                 "subfolder_options": self.drive_selector.get_selected_options()
             }
             os.makedirs(os.path.dirname(os.path.abspath(self.config_path)), exist_ok=True)
@@ -167,13 +186,13 @@ class MainWindow(QMainWindow):
 
     def start_backup(self):
         """Validates inputs and starts BackupWorker thread."""
-        source_drive = self.drive_selector.get_selected_drive_path()
+        source_location = self.drive_selector.get_selected_drive_path()
         target_dir = self.drive_selector.get_target_directory()
         suffix = self.drive_selector.get_custom_suffix()
         folder_opts = self.drive_selector.get_selected_options()
 
-        if not source_drive or not os.path.exists(source_drive):
-            self.alert_banner.show_alert("Please select a valid source SD card drive.", level="ERROR")
+        if not source_location or not os.path.exists(source_location):
+            self.alert_banner.show_alert("Please select a valid source drive or folder.", level="ERROR")
             return
 
         if not target_dir:
@@ -189,9 +208,9 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(True)
 
         self.worker = BackupWorker(
-            source_card_path=source_drive,
+            source_card_path=source_location,
             target_dir=target_dir,
-            fastcopy_path="",
+            fastcopy_path=self.fastcopy_path,
             custom_suffix=suffix,
             folder_opts=folder_opts
         )
@@ -201,6 +220,7 @@ class MainWindow(QMainWindow):
         self.worker.signals.scan_progress.connect(self._on_scan_progress)
         self.worker.signals.duplicate_found.connect(self._on_duplicate_found)
         self.worker.signals.transfer_started.connect(self._on_transfer_started)
+        self.worker.signals.transfer_progress.connect(self._on_transfer_progress)
         self.worker.signals.transfer_line.connect(self._on_transfer_line)
         self.worker.signals.read_error.connect(self._on_read_error)
         self.worker.signals.finished.connect(self._on_backup_finished)
@@ -219,15 +239,18 @@ class MainWindow(QMainWindow):
         self.log_console.append_trace(f"🔍 Scan started: {scan_root}")
 
     def _on_scan_progress(self, current: int, total: int, filename: str):
-        self.progress_panel.update_overall(current, total, f"Scanning: {filename}")
-        self.progress_panel.update_details(f"{current} / {total}", "Scanning...")
+        self.progress_panel.update_scan_progress(current, total, filename)
 
     def _on_duplicate_found(self, filename: str, hash_val: str, size: int):
         self.log_console.add_duplicate(filename, hash_val, size)
 
     def _on_transfer_started(self, total_files: int, total_bytes: int):
+        self.progress_panel.reset_for_transfer(total_files, total_bytes)
         gb = total_bytes / (1024 ** 3)
         self.log_console.append_trace(f"🚀 FastCopy execution phase started ({total_files} files, {gb:.2f} GB)")
+
+    def _on_transfer_progress(self, copied_count: int, total_files: int, current_filename: str, file_pct: int):
+        self.progress_panel.update_transfer_progress(copied_count, total_files, current_filename, file_pct)
 
     def _on_transfer_line(self, line: str):
         self.log_console.append_trace(line)

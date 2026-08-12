@@ -1,6 +1,6 @@
 """
 FastCopy CLI Subprocess Driver for SD-FastBackup.
-Resolves executable location, formats UTF-8 manifest files, and executes high-speed copy operations.
+Resolves executable location (FastCopy.exe or fcp.exe), formats UTF-8 manifest files, and executes high-speed copy operations.
 """
 import os
 import sys
@@ -12,56 +12,83 @@ from typing import List, Generator, Optional
 
 def resolve_fastcopy_executable(custom_path: Optional[str] = None) -> Optional[str]:
     """
-    Resolves FastCopy.exe in order of priority:
-    1. Custom path provided in config/settings (if exists)
-    2. `./bin/FastCopy.exe` relative to working directory or script root
-    3. `C:\\Program Files\\FastCopy\\FastCopy.exe`
-    4. PATH environment variable
+    Resolves FastCopy or fcp executable in order of priority:
+    1. Custom path provided in config/settings (file path or folder containing fcp.exe / FastCopy.exe)
+    2. Working directory `./bin/fcp.exe` or `./bin/FastCopy.exe`
+    3. Module base directory `./bin/fcp.exe` or `./bin/FastCopy.exe`
+    4. `C:\\Program Files\\FastCopy\\fcp.exe` or `C:\\Program Files\\FastCopy\\FastCopy.exe`
+    5. PATH environment variable (`fcp.exe`, `FastCopy.exe`)
     """
-    # 1. Custom path
-    if custom_path and os.path.exists(custom_path) and os.path.isfile(custom_path):
-        return os.path.abspath(custom_path)
+    executable_names = ["fcp.exe", "FastCopy.exe", "fastcopy.exe", "fcp"]
 
-    # 2. Relative ./bin/FastCopy.exe
-    base_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
-    relative_bin = os.path.join(base_dir, "bin", "FastCopy.exe")
-    if os.path.exists(relative_bin):
-        return relative_bin
+    # 1. Custom path check
+    if custom_path:
+        if custom_path.lower() == "none" or custom_path.lower() == "fallback":
+            return None
+        custom_path = os.path.normpath(custom_path)
+        if os.path.isfile(custom_path) and os.path.exists(custom_path):
+            return custom_path
+        if os.path.isdir(custom_path):
+            for name in executable_names:
+                candidate = os.path.normpath(os.path.join(custom_path, name))
+                if os.path.exists(candidate):
+                    return candidate
 
-    current_relative_bin = os.path.join(os.getcwd(), "bin", "FastCopy.exe")
-    if os.path.exists(current_relative_bin):
-        return current_relative_bin
+    # 2. Check current working directory bin first
+    cwd_bin = os.path.normpath(os.path.join(os.getcwd(), "bin"))
+    for name in executable_names:
+        candidate = os.path.join(cwd_bin, name)
+        if os.path.exists(candidate):
+            return candidate
 
-    # 3. Default System Install
-    default_system = r"C:\Program Files\FastCopy\FastCopy.exe"
-    if os.path.exists(default_system):
-        return default_system
+    # 3. Check module directory bin
+    module_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    module_bin = os.path.normpath(os.path.join(module_dir, "bin"))
+    for name in executable_names:
+        candidate = os.path.join(module_bin, name)
+        if os.path.exists(candidate):
+            return candidate
 
-    # 4. PATH lookup
-    in_path = shutil.which("FastCopy.exe") or shutil.which("fastcopy.exe")
-    if in_path:
-        return in_path
+    # 4. Default System Install
+    default_install_dirs = [
+        r"C:\Program Files\FastCopy",
+        r"C:\Program Files (x86)\FastCopy"
+    ]
+    for sys_dir in default_install_dirs:
+        for name in executable_names:
+            candidate = os.path.normpath(os.path.join(sys_dir, name))
+            if os.path.exists(candidate):
+                return candidate
+
+    # 5. PATH lookup
+    for name in executable_names:
+        in_path = shutil.which(name)
+        if in_path:
+            return os.path.normpath(in_path)
 
     return None
 
 
 class FastCopyRunner:
-    """Wraps FastCopy executable for high-speed file transfers."""
+    """Wraps FastCopy / fcp executable for high-speed file transfers."""
 
-    def __init__(self, fastcopy_executable_path: Optional[str] = None):
-        self.exe_path = resolve_fastcopy_executable(fastcopy_executable_path)
+    def __init__(self, fastcopy_executable_path: Optional[str] = None, force_fallback: bool = False):
+        if force_fallback:
+            self.exe_path = None
+        else:
+            self.exe_path = resolve_fastcopy_executable(fastcopy_executable_path)
 
     def execute_manifest_copy(self, source_files: List[str], target_dir: str) -> Generator[str, None, int]:
         """
-        Creates a temporary manifest file and spawns FastCopy subprocess.
-        If FastCopy is not installed, falls back to standard Python shutil copy with logging.
+        Creates a temporary manifest file and spawns FastCopy / fcp subprocess.
+        If FastCopy is not installed or force_fallback is True, uses built-in Python shutil copy.
         Yields STDOUT lines for UI progress updates.
         Returns returncode (0 for success).
         """
         if not source_files:
             return 0
 
-        target_dir = os.path.abspath(target_dir)
+        target_dir = os.path.normpath(os.path.abspath(target_dir))
         os.makedirs(target_dir, exist_ok=True)
 
         if not self.exe_path:
@@ -69,21 +96,22 @@ class FastCopyRunner:
             yield "[ENGINE] FastCopy binary not found. Using built-in Python transfer engine..."
             for idx, src in enumerate(source_files, start=1):
                 try:
-                    rel_name = os.path.basename(src)
-                    dst = os.path.join(target_dir, rel_name)
-                    shutil.copy2(src, dst)
+                    norm_src = os.path.normpath(src)
+                    rel_name = os.path.basename(norm_src)
+                    dst = os.path.normpath(os.path.join(target_dir, rel_name))
+                    shutil.copy2(norm_src, dst)
                     yield f"[{idx}/{len(source_files)}] Copied: {rel_name}"
                 except Exception as e:
                     yield f"[{idx}/{len(source_files)}] ERROR copying {src}: {e}"
             return 0
 
-        # FastCopy Manifest Copy
+        # FastCopy / fcp Manifest Copy
         manifest_path = ""
         try:
             with tempfile.NamedTemporaryFile('w', delete=False, suffix='.txt', encoding='utf-8-sig') as temp_manifest:
                 manifest_path = temp_manifest.name
                 for path in source_files:
-                    temp_manifest.write(f"{os.path.abspath(path)}\n")
+                    temp_manifest.write(f"{os.path.normpath(os.path.abspath(path))}\n")
 
             cmd = [
                 self.exe_path,

@@ -1,6 +1,6 @@
 """
 Metadata Engine & Composite Hasher for SD-FastBackup.
-Extracts Date Taken via EXIF, PyMediaInfo, or mtime fallback, and computes fast composite SHA256 hashes.
+Extracts Date Taken via EXIF (including RAW formats), PyMediaInfo, or mtime fallback, and computes fast composite SHA256 hashes.
 """
 import os
 import hashlib
@@ -13,8 +13,14 @@ from pymediainfo import MediaInfo
 class MetadataExtractor:
     """Extracts Date Taken and Size to generate a unique composite hash."""
 
-    IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.tif', '.tiff', '.cr2', '.cr3', '.nef', '.arw', '.dng', '.heic')
-    VIDEO_EXTENSIONS = ('.mp4', '.mov', '.mxf', '.crm', '.ari', '.avi', '.mkv', '.braw')
+    IMAGE_EXTENSIONS = (
+        '.jpg', '.jpeg', '.tif', '.tiff', '.heic',
+        '.nef', '.cr2', '.cr3', '.arw', '.dng', '.raw', 
+        '.orf', '.rw2', '.pef', '.raf', '.srw', '.erf', '.3fr', '.iiq', '.nrw'
+    )
+    VIDEO_EXTENSIONS = (
+        '.mp4', '.mov', '.mxf', '.crm', '.ari', '.avi', '.mkv', '.braw', '.mts', '.m2ts'
+    )
 
     @staticmethod
     def get_file_size(file_path: str) -> int:
@@ -25,14 +31,14 @@ class MetadataExtractor:
     def extract_date_taken(cls, file_path: str) -> Tuple[datetime, str]:
         """
         Attempts date_taken extraction via:
-        1. EXIF Metadata (exifread for image files)
+        1. EXIF Metadata (exifread for photo and camera RAW files)
         2. MediaInfo Container Metadata (pymediainfo for video files)
         3. Fallback to Filesystem mtime
         Returns: (datetime_object, source_name_str)
         """
         ext = os.path.splitext(file_path)[1].lower()
 
-        # 1. EXIF Extraction for Images
+        # 1. EXIF Extraction for Images & RAWs
         if ext in cls.IMAGE_EXTENSIONS:
             try:
                 with open(file_path, 'rb') as f:
@@ -51,7 +57,6 @@ class MetadataExtractor:
                 media_info = MediaInfo.parse(file_path)
                 for track in media_info.tracks:
                     if track.track_type == 'General':
-                        # Check encoded_date, tagged_date, or file_last_modification_date
                         date_candidates = [
                             getattr(track, 'encoded_date', None),
                             getattr(track, 'tagged_date', None),
@@ -59,7 +64,6 @@ class MetadataExtractor:
                         ]
                         for candidate in date_candidates:
                             if candidate:
-                                # Clean string e.g. "UTC 2026-03-29 14:02:11"
                                 clean_str = str(candidate).replace("UTC ", "").strip()
                                 try:
                                     dt = datetime.strptime(clean_str[:19], '%Y-%m-%d %H:%M:%S')
@@ -73,11 +77,9 @@ class MetadataExtractor:
         try:
             mtime = os.path.getmtime(file_path)
             dt = datetime.fromtimestamp(mtime)
-            # Strip microseconds for uniform string formatting
             dt = dt.replace(microsecond=0)
             return dt, "MTIME"
         except Exception:
-            # Emergency fallback: current time
             now = datetime.now().replace(microsecond=0)
             return now, "FALLBACK"
 

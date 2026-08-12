@@ -1,34 +1,47 @@
 """
 Path formatting utilities for SD-FastBackup.
-Organizes destination directories and renames files based on date_taken.
+Organizes destination directories, preserves panorama/burst/stack subfolders, and enforces Windows backslashes.
 """
 import os
 import re
+import sys
 from datetime import datetime
-from typing import List
+from typing import List, Optional
+
+
+# Stack/special folder keywords to preserve in target structure
+STACK_KEYWORDS = {"PANO", "PANORAMA", "BURST", "HDR", "STACK", "TIMELAPSE", "STEREO", "3D", "TRASH", "CLIP"}
+
+
+def normalize_win_path(path_str: str) -> str:
+    """Normalizes slashes to Windows backslashes '\\' on Windows systems."""
+    if not path_str:
+        return ""
+    norm = os.path.normpath(path_str)
+    if sys.platform == "win32" or os.name == "nt":
+        return norm.replace("/", "\\")
+    return norm
 
 
 def sanitize_path(path_str: str) -> str:
     """Removes or replaces invalid filesystem characters from filename or path component."""
-    # Replace characters illegal in Windows paths: < > : " | ? *
     sanitized = re.sub(r'[<>:"|?*]', '_', path_str)
     return sanitized.strip()
 
 
 def format_target_relative_dir(dt: datetime) -> str:
     """
-    Formats directory structure relative to target root: YYYY/YYYY-MM/YYYY-MM-DD
+    Formats directory structure relative to target root: YYYY/YYYY-MM/YYYY-MM-DD (or YYYY\\YYYY-MM\\YYYY-MM-DD on Windows).
     """
     year = dt.strftime("%Y")
     year_month = dt.strftime("%Y-%m")
     year_month_day = dt.strftime("%Y-%m-%d")
-    return os.path.join(year, year_month, year_month_day)
+    return normalize_win_path(os.path.join(year, year_month, year_month_day))
 
 
 def format_target_filename(dt: datetime, original_filename: str, suffix: str = "") -> str:
     """
     Formats target filename: YYYYMMDD_HHMMSS_<Suffix_Or_OriginalName>.<ext>
-    If suffix is provided, uses suffix in place of original stem or appended to timestamp.
     """
     timestamp = dt.strftime("%Y%m%d_%H%M%S")
     _, ext = os.path.splitext(original_filename)
@@ -41,44 +54,84 @@ def format_target_filename(dt: datetime, original_filename: str, suffix: str = "
     return f"{timestamp}_{middle}{ext}"
 
 
-def format_full_target_path(target_root: str, dt: datetime, original_filename: str, suffix: str = "") -> str:
+def extract_stack_subfolder(original_rel_path: str) -> Optional[str]:
     """
-    Returns full destination target path for a file.
+    Checks if original relative path contains a panorama/burst/stack subfolder name and returns it.
+    Example: 'DCIM/100EOS/PANO/IMG_0001.JPG' -> 'PANO'
+    """
+    if not original_rel_path:
+        return None
+
+    parts = normalize_win_path(original_rel_path).split(os.sep)
+    for part in parts[:-1]:  # Exclude file name
+        part_upper = part.upper()
+        if part_upper in STACK_KEYWORDS or any(kw in part_upper for kw in STACK_KEYWORDS):
+            return sanitize_path(part)
+
+    return None
+
+
+def format_full_target_path(
+    target_root: str, 
+    dt: datetime, 
+    original_filename: str, 
+    suffix: str = "", 
+    original_rel_path: str = ""
+) -> str:
+    """
+    Returns full destination target path for a file, preserving stack folders if present.
+    Format: <Target_Root>\\YYYY\\YYYY-MM\\YYYY-MM-DD\\[Stack_Folder\\]YYYYMMDD_HHMMSS_<Suffix>.<ext>
     """
     rel_dir = format_target_relative_dir(dt)
     filename = format_target_filename(dt, original_filename, suffix=suffix)
-    return os.path.join(target_root, rel_dir, filename)
+
+    stack_dir = extract_stack_subfolder(original_rel_path) if original_rel_path else None
+    
+    if stack_dir:
+        full_p = os.path.join(target_root, rel_dir, stack_dir, filename)
+    else:
+        full_p = os.path.join(target_root, rel_dir, filename)
+
+    return normalize_win_path(full_p)
 
 
-def filter_source_files(source_root: str, include_dcim: bool = True, include_private: bool = True, full_volume: bool = False) -> List[str]:
+def filter_source_files(
+    source_root: str, 
+    include_dcim: bool = True, 
+    include_private: bool = True, 
+    full_volume: bool = False
+) -> List[str]:
     """
-    Discovers source files within specified directories (DCIM, PRIVATE, or full volume).
+    Discovers source files within specified directories (DCIM, PRIVATE, or full volume / custom folder).
+    Always returns normalized paths.
     """
-    if not os.path.exists(source_root):
+    norm_source = normalize_win_path(source_root)
+    if not os.path.exists(norm_source):
         return []
 
     collected_files = []
     
-    if full_volume:
-        target_paths = [source_root]
+    # If source is a specific directory chosen directly by user (or full_volume is set)
+    # or if neither DCIM nor PRIVATE exists inside source_root: scan full directory tree
+    has_dcim = os.path.exists(os.path.join(norm_source, "DCIM"))
+    has_private = os.path.exists(os.path.join(norm_source, "PRIVATE"))
+
+    if full_volume or (not has_dcim and not has_private):
+        target_paths = [norm_source]
     else:
         target_paths = []
-        if include_dcim:
-            dcim_dir = os.path.join(source_root, "DCIM")
-            if os.path.exists(dcim_dir):
-                target_paths.append(dcim_dir)
-        if include_private:
-            private_dir = os.path.join(source_root, "PRIVATE")
-            if os.path.exists(private_dir):
-                target_paths.append(private_dir)
+        if include_dcim and has_dcim:
+            target_paths.append(os.path.join(norm_source, "DCIM"))
+        if include_private and has_private:
+            target_paths.append(os.path.join(norm_source, "PRIVATE"))
         if not target_paths:
-            # Fallback to root if neither DCIM nor PRIVATE exists
-            target_paths.append(source_root)
+            target_paths.append(norm_source)
 
     for search_dir in target_paths:
         for root, _, files in os.walk(search_dir):
             for f in files:
                 if not f.startswith('.'):
-                    collected_files.append(os.path.join(root, f))
+                    full_f = normalize_win_path(os.path.join(root, f))
+                    collected_files.append(full_f)
 
     return collected_files

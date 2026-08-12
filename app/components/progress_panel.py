@@ -17,7 +17,7 @@ class ProgressPanelWidget(QGroupBox):
         layout.setSpacing(8)
 
         # 1. Status Label Row
-        self.status_label = QLabel("Status: Idle")
+        self.status_label = QLabel("Status: Ready")
         self.status_label.setStyleSheet("font-weight: bold; color: #E0E0E0;")
         layout.addWidget(self.status_label)
 
@@ -44,29 +44,44 @@ class ProgressPanelWidget(QGroupBox):
         layout.addLayout(file_layout)
 
         # 4. Details / Speed Indicator
-        self.details_label = QLabel("Files: 0 / 0 | Bytes: 0 B | Speed: --")
+        self.details_label = QLabel("Files: 0 / 0 | Bytes: 0 B | Status: Ready")
         self.details_label.setStyleSheet("color: #00ADB5; font-size: 12px;")
         layout.addWidget(self.details_label)
 
     def reset_progress(self):
         self.overall_bar.setValue(0)
         self.file_bar.setValue(0)
-        self.status_label.setText("Status: Idle")
-        self.details_label.setText("Files: 0 / 0 | Bytes: 0 B | Speed: --")
+        self.status_label.setText("Status: Starting pipeline...")
+        self.details_label.setText("Files: 0 / 0 | Bytes: 0 B | Status: Preparing...")
 
-    def update_overall(self, current: int, total: int, status_msg: str = ""):
+    def update_scan_progress(self, current: int, total: int, filename: str):
         pct = int((current / total * 100)) if total > 0 else 0
         self.overall_bar.setValue(pct)
-        if status_msg:
-            self.status_label.setText(f"Status: {status_msg}")
+        self.file_bar.setValue(pct)
+        self.status_label.setText(f"Status [Scanning {current}/{total}]: {filename}")
+        self.details_label.setText(f"Scanned: {current} / {total} files")
+
+    def reset_for_transfer(self, total_files: int, total_bytes: int):
+        gb = total_bytes / (1024 ** 3)
+        self.overall_bar.setValue(0)
+        self.file_bar.setValue(0)
+        self.status_label.setText(f"Status: Transferring {total_files} files ({gb:.2f} GB)...")
+        self.details_label.setText(f"Copied: 0 / {total_files} files | Total: {gb:.2f} GB")
+
+    def update_transfer_progress(self, copied_count: int, total_files: int, current_filename: str, file_pct: int = 100):
+        overall_pct = int((copied_count / total_files * 100)) if total_files > 0 else 0
+        self.overall_bar.setValue(overall_pct)
+        self.file_bar.setValue(file_pct)
+        self.status_label.setText(f"Status [Copying {copied_count}/{total_files}]: {current_filename}")
+        self.details_label.setText(f"Copied: {copied_count} / {total_files} files ({overall_pct}%)")
+
+    def update_overall(self, current: int, total: int, status_msg: str = ""):
+        self.update_scan_progress(current, total, status_msg)
 
     def update_file_progress(self, percent: int, filename: str = ""):
         self.file_bar.setValue(percent)
         if filename:
             self.status_label.setText(f"Status: {filename}")
 
-    def update_details(self, files_str: str, bytes_str: str, speed_str: str = ""):
-        text = f"Files: {files_str} | Transferred: {bytes_str}"
-        if speed_str:
-            text += f" | Speed: {speed_str}"
-        self.details_label.setText(text)
+    def update_details(self, files_str: str, bytes_str: str):
+        self.details_label.setText(f"Files: {files_str} | Transferred: {bytes_str}")
