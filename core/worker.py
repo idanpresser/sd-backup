@@ -5,6 +5,7 @@ Dual-Engine execution (FastCopy CLI for SD Cards / MTPEngine for Mobile Phones),
 and same-volume file renaming with collision avoidance.
 """
 import os
+import sys
 import time
 import shutil
 import logging
@@ -14,7 +15,7 @@ from PySide6.QtCore import QThread, Signal, QObject
 from core.metadata import MetadataExtractor
 from core.db import DatabaseManager
 from core.fastcopy import FastCopyRunner, parse_fastcopy_stdout_line
-from core.mtp_engine import MTPEngine, is_mtp_path, parse_mtp_device_name, parse_mtp_subfolder_path
+from core.mtp_engine import MTPEngine, is_mtp_path, parse_mtp_device_name, parse_mtp_subfolder_path, _ensure_coinitialize
 from utils.path_formatter import (
     filter_source_files, 
     format_full_target_path, 
@@ -68,6 +69,7 @@ class BackupWorker(QThread):
         self._is_cancelled = False
 
     def run(self):
+        _ensure_coinitialize()
         try:
             db = DatabaseManager(self.target_dir)
 
@@ -82,6 +84,7 @@ class BackupWorker(QThread):
 
     def _run_mtp_pipeline(self, db: DatabaseManager):
         """Engine B: MTP Mobile Phone Transfer Pipeline (Android & iPhone)."""
+        _ensure_coinitialize()
         mtp_engine = MTPEngine()
         dev_name = parse_mtp_device_name(self.source_path)
         subfolder_path = parse_mtp_subfolder_path(self.source_path)
@@ -103,6 +106,9 @@ class BackupWorker(QThread):
 
         total_files = len(mtp_files)
         if total_files == 0:
+            err_msg = "0 media files found. Please UNLOCK your phone screen and ensure USB mode is set to 'File Transfer / MTP' on your phone."
+            self.signals.read_error.emit(display_name, err_msg)
+            self.signals.transfer_line.emit(f"⚠️ MTP Access Warning for '{display_name}': {err_msg}")
             self.signals.finished.emit({'scanned': 0, 'duplicates': 0, 'copied': 0, 'bytes': 0})
             db.checkpoint()
             return

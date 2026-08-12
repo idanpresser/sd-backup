@@ -1,7 +1,7 @@
 """
 Windows Shell COM MTP Driver for SD-FastBackup.
 Provides MTP (Media Transfer Protocol) device detection, virtual directory traversal, 
-metadata extraction, stream copying, and subfolder resolution for smartphones (Android & iPhone).
+metadata extraction, stream copying, and thread-safe COM CoInitialize for smartphones (Android & iPhone).
 """
 import os
 import sys
@@ -15,9 +15,19 @@ from utils.media_filter import is_media_file
 
 try:
     import win32com.client
+    import pythoncom
     HAS_WIN32COM = True
 except ImportError:
     HAS_WIN32COM = False
+
+
+def _ensure_coinitialize():
+    """Ensures COM Single-Threaded Apartment is initialized on background QThreads."""
+    if HAS_WIN32COM and sys.platform == "win32":
+        try:
+            pythoncom.CoInitialize()
+        except Exception:
+            pass
 
 
 def is_mtp_path(path_str: str) -> bool:
@@ -56,10 +66,12 @@ class MTPEngine:
     """Windows Shell COM engine for browsing and transferring MTP phone media."""
 
     def __init__(self):
+        _ensure_coinitialize()
         self.shell = win32com.client.Dispatch("Shell.Application") if HAS_WIN32COM else None
 
     def get_mtp_devices(self) -> List[Dict[str, Any]]:
         """Enumerates connected MTP devices under 'This PC' (Shell Namespace 17)."""
+        _ensure_coinitialize()
         devices = []
         if not self.shell:
             return devices
@@ -96,6 +108,7 @@ class MTPEngine:
 
     def _get_device_root_folder(self, device_name: str):
         """Locates the device shell folder for device_name under 'This PC'."""
+        _ensure_coinitialize()
         if not self.shell:
             return None
 
@@ -122,6 +135,7 @@ class MTPEngine:
         and returns file dicts:
         [{'file_item': shell_item, 'name': fname, 'rel_path': rel_path, 'size': size_bytes, 'date_taken': datetime_obj}]
         """
+        _ensure_coinitialize()
         file_list = []
         target_folder = self._get_device_root_folder(device_name)
         if not target_folder:
@@ -219,6 +233,7 @@ class MTPEngine:
         """
         Copies an MTP virtual shell item to standard local Windows filesystem path.
         """
+        _ensure_coinitialize()
         if not self.shell:
             return False
 
@@ -264,6 +279,7 @@ def browse_with_windows_shell(hwnd: int = 0) -> Optional[str]:
     or subfolders (Internal shared storage) or standard local drive folders.
     Reconstructs MTP:\\DeviceName\\SubFolder.
     """
+    _ensure_coinitialize()
     if not HAS_WIN32COM:
         return None
 
@@ -274,13 +290,11 @@ def browse_with_windows_shell(hwnd: int = 0) -> Optional[str]:
             item_path = str(folder.Self.Path)
 
             if not os.path.exists(item_path) or item_path.startswith("::{"):
-                # Walk up parent chain to resolve device name and subfolder path
                 path_parts = []
                 curr = folder
                 
                 while curr and hasattr(curr, "Title"):
                     title = str(curr.Title)
-                    # Check if curr is This PC
                     if title.lower() in ["this pc", "computer", "my computer"]:
                         break
                     path_parts.insert(0, str(curr.Self.Name) if hasattr(curr, "Self") else title)
