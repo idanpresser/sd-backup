@@ -1,9 +1,11 @@
 """
 Multi-Threaded Backup Worker for SD-FastBackup.
-Orchestrates volume scanning, metadata extraction, deduplication, SQLite cataloging, and FastCopy execution in QThread.
+Orchestrates volume scanning, metadata extraction, deduplication, SQLite cataloging, 
+FastCopy staging execution, and instantaneous same-volume file renaming.
 """
 import os
 import time
+import shutil
 import logging
 from typing import Optional, Dict, Any
 from PySide6.QtCore import QThread, Signal, QObject
@@ -53,6 +55,10 @@ class BackupWorker(QThread):
             db = DatabaseManager(self.target_dir)
             fastcopy = FastCopyRunner(self.fastcopy_path)
 
+            # Staging directory on the target drive for fastcopy batching
+            staging_dir = os.path.join(self.target_dir, ".sd_staging")
+            os.makedirs(staging_dir, exist_ok=True)
+
             # 1. Register Volume Info
             vol_info = get_drive_volume_info(self.source_path)
             db.register_volume(vol_info["serial"], vol_info["label"])
@@ -70,6 +76,7 @@ class BackupWorker(QThread):
 
             if total_files == 0:
                 summary = {'scanned': 0, 'duplicates': 0, 'copied': 0, 'bytes': 0}
+                self._cleanup_staging(staging_dir)
                 self.signals.finished.emit(summary)
                 db.checkpoint()
                 return
@@ -82,6 +89,7 @@ class BackupWorker(QThread):
             # 3. Scanning, Metadata Extraction & Deduplication Phase
             for idx, file_path in enumerate(source_files, start=1):
                 if self._is_cancelled:
+                    self._cleanup_staging(staging_dir)
                     db.checkpoint()
                     return
 
@@ -106,7 +114,7 @@ class BackupWorker(QThread):
                 # Register in SQLite catalog
                 db.register_file(composite_hash, file_basename, rel_path, size, dt_iso, source_type)
 
-                # Format target path preserving panorama/burst/stack subfolder structure
+                # Format target destination path (preserving panorama/burst/stack subfolder structure)
                 target_destination = format_full_target_path(
                     self.target_dir, 
                     date_taken, 
@@ -124,7 +132,7 @@ class BackupWorker(QThread):
                     files_to_copy.append((norm_file_path, target_destination, composite_hash, size))
                     total_copy_bytes += size
 
-            # 4. Transfer Execution Phase
+            # 4. FastCopy Batch Staging Transfer Phase
             copied_count = 0
             if files_to_copy and not self._is_cancelled:
                 total_copy_files = len(files_to_copy)
@@ -132,20 +140,39 @@ class BackupWorker(QThread):
                 
                 source_paths = [item[0] for item in files_to_copy]
 
-                # Run FastCopy / fcp runner and update transfer progress
-                # Yields stdout output lines
-                for output_line in fastcopy.execute_manifest_copy(source_paths, self.target_dir):
+                # FastCopy copies files into staging_dir at top speed
+                for output_line in fastcopy.execute_manifest_copy(source_paths, staging_dir):
                     if self._is_cancelled:
+                        self._cleanup_staging(staging_dir)
                         db.checkpoint()
                         return
                     self.signals.transfer_line.emit(output_line)
 
-                # Mark copied status in database and emit progress
-                for idx, (src_p, dst_p, h_val, f_size) in enumerate(files_to_copy, start=1):
-                    db.update_transfer_status(h_val, src_p, dst_p, 'COPIED')
+                # 5. Instant Same-Volume Move & Rename Phase
+                for idx, (src_p, final_dst_p, h_val, f_size) in enumerate(files_to_copy, start=1):
+                    if self._is_cancelled:
+                        self._cleanup_staging(staging_dir)
+                        db.checkpoint()
+                        return
+
+                    orig_name = os.path.basename(src_p)
+                    staged_file_path = os.path.join(staging_dir, orig_name)
+
+                    # Ensure target parent folder exists
+                    os.makedirs(os.path.dirname(final_dst_p), exist_ok=True)
+
+                    if os.path.exists(staged_file_path):
+                        # Instant rename on same drive
+                        shutil.move(staged_file_path, final_dst_p)
+                    elif os.path.exists(src_p):
+                        # Fallback if fastcopy wasn't used or skipped file
+                        shutil.copy2(src_p, final_dst_p)
+
+                    db.update_transfer_status(h_val, src_p, final_dst_p, 'COPIED')
                     copied_count += 1
-                    fname = os.path.basename(src_p)
-                    self.signals.transfer_progress.emit(copied_count, total_copy_files, fname, 100)
+                    self.signals.transfer_progress.emit(copied_count, total_copy_files, os.path.basename(final_dst_p), 100)
+
+            self._cleanup_staging(staging_dir)
 
             summary = {
                 'scanned': total_files,
@@ -160,6 +187,14 @@ class BackupWorker(QThread):
         except Exception as e:
             logging.exception("Fatal error in BackupWorker pipeline.")
             self.signals.error.emit(str(e))
+
+    def _cleanup_staging(self, staging_dir: str):
+        """Removes temporary staging directory after batch transfer."""
+        if os.path.exists(staging_dir):
+            try:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     def cancel(self):
         """Cancels the ongoing backup operation."""
