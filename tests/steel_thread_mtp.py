@@ -171,25 +171,28 @@ def run_steel_thread():
     if valid_media:
         target_sample = valid_media[0]
         print(f"\n[LAYER 6] Testing Stream File Copy (CopyHere) on sample file: '{target_sample['name']}'...")
-        temp_dir = tempfile.mkdtemp(prefix="steel_mtp_")
+        temp_dir = os.path.abspath(tempfile.mkdtemp(prefix="steel_mtp_"))
         try:
             dest_shell = shell.NameSpace(temp_dir)
-            dest_shell.CopyHere(target_sample['item'], 16)
-            
-            staged_path = os.path.join(temp_dir, target_sample['name'])
-            start_t = time.time()
-            copied = False
-            while (time.time() - start_t) < 15:
-                if os.path.exists(staged_path) and os.path.getsize(staged_path) > 0:
-                    copied = True
-                    break
-                time.sleep(0.2)
+            if dest_shell:
+                dest_shell.CopyHere(target_sample['item'], 16)
+                
+                staged_path = os.path.join(temp_dir, target_sample['name'])
+                start_t = time.time()
+                copied = False
+                while (time.time() - start_t) < 15:
+                    if os.path.exists(staged_path) and os.path.getsize(staged_path) > 0:
+                        copied = True
+                        break
+                    time.sleep(0.2)
 
-            if copied:
-                bytes_copied = os.path.getsize(staged_path)
-                print(f"  ✅ LAYER 6 SUCCESS: File '{target_sample['name']}' copied ({bytes_copied} bytes).")
+                if copied:
+                    bytes_copied = os.path.getsize(staged_path)
+                    print(f"  ✅ LAYER 6 SUCCESS: File '{target_sample['name']}' copied ({bytes_copied} bytes).")
+                else:
+                    print(f"  ❌ LAYER 6 FAILED: CopyHere timed out after 15s for '{target_sample['name']}'.")
             else:
-                print(f"  ❌ LAYER 6 FAILED: CopyHere timed out after 15s for '{target_sample['name']}'.")
+                print("  ❌ LAYER 6 FAILED: Could not access temp_dir shell namespace.")
         finally:
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
