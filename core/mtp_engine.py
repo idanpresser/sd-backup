@@ -11,6 +11,7 @@ import tempfile
 import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+from utils.media_filter import is_media_file
 
 try:
     import win32com.client
@@ -124,7 +125,7 @@ class MTPEngine:
         include_private: bool, 
         full_volume: bool
     ):
-        """Recursively traverses MTP virtual shell folders (locale-independent)."""
+        """Recursively traverses MTP virtual shell folders, applying multi-layer media filter."""
         try:
             items = folder_item.Items()
             for item in items:
@@ -146,7 +147,10 @@ class MTPEngine:
                     sub_rel = os.path.join(current_rel, name)
                     self._traverse_folder(sub_folder, sub_rel, results, include_dcim, include_private, full_volume)
                 else:
-                    # File item
+                    # Apply Multi-Layer Media Filter
+                    if not is_media_file(name):
+                        continue
+
                     size = getattr(item, 'Size', 0)
                     if not size:
                         try:
@@ -230,16 +234,12 @@ def browse_with_windows_shell(hwnd: int = 0) -> Optional[str]:
 
     try:
         shell = win32com.client.Dispatch("Shell.Application")
-        # BIF_RETURNONLYFSDIRS = 0x0001, BIF_NONEWFOLDERBUTTON = 0x0200
-        # 17 = ssfDRIVES (This PC)
         folder = shell.BrowseForFolder(hwnd, "Select Source Drive, Folder, or Mobile Phone (MTP)", 0, 17)
         if folder:
             title = str(folder.Title)
             item_path = str(folder.Self.Path)
 
-            # Check if MTP device or inside MTP device
             if not os.path.exists(item_path) or item_path.startswith("::{"):
-                # MTP item selected
                 name = str(folder.Self.Name)
                 return f"MTP:\\{name}"
             else:

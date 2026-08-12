@@ -1,13 +1,14 @@
 """
 Path formatting utilities for SD-FastBackup.
 Organizes destination directories, preserves panorama/burst/stack subfolders, 
-and provides smart filename sequence extraction.
+provides smart filename sequence extraction, and applies multi-layer media filtering.
 """
 import os
 import re
 import sys
 from datetime import datetime
 from typing import List, Optional, Tuple
+from utils.media_filter import is_media_file
 
 
 # Stack/special folder keywords to preserve in target structure
@@ -40,7 +41,7 @@ def extract_sequence_and_clean_stem(original_filename: str) -> Tuple[str, str]:
     """
     stem = os.path.splitext(os.path.basename(original_filename))[0]
 
-    # 1. Detect and strip embedded timestamp patterns (e.g. 20260811150626, 20260811_150626, 2026-08-11_15-06-26)
+    # 1. Detect and strip embedded timestamp patterns
     timestamp_patterns = [
         r'(?:19|20)\d{12}',                   # 14-digit YYYYMMDDHHMMSS e.g. 20260811150626
         r'(?:19|20)\d{6}[_\-]\d{6}',          # YYYYMMDD_HHMMSS e.g. 20260811_150626
@@ -55,7 +56,6 @@ def extract_sequence_and_clean_stem(original_filename: str) -> Tuple[str, str]:
     # Clean up residual multiple underscores or hyphens
     cleaned_stem = re.sub(r'[_\-]{2,}', '_', cleaned_stem).strip('_-')
 
-    # If removing timestamp emptied the stem, revert to original
     if not cleaned_stem:
         cleaned_stem = stem
 
@@ -90,8 +90,6 @@ def format_target_filename(dt: datetime, original_filename: str, suffix: str = "
     sanitized_suffix = sanitize_path(suffix) if suffix else ""
 
     if sanitized_suffix:
-        # If user supplied custom suffix (e.g. MAVIC), combine with sequence/tag components
-        # e.g. DJI_0113_D -> MAVIC_0113_D
         brand_prefixes = [r'^DJI_', r'^IMG_', r'^DSC_', r'^GX\d{2}']
         stem_no_brand = cleaned_stem
         for bp in brand_prefixes:
@@ -116,7 +114,7 @@ def extract_stack_subfolder(original_rel_path: str) -> Optional[str]:
         return None
 
     parts = normalize_win_path(original_rel_path).split(os.sep)
-    for part in parts[:-1]:  # Exclude file name
+    for part in parts[:-1]:
         part_upper = part.upper()
         if part_upper in STACK_KEYWORDS or any(kw in part_upper for kw in STACK_KEYWORDS):
             return sanitize_path(part)
@@ -176,6 +174,7 @@ def filter_source_files(
 ) -> List[str]:
     """
     Discovers source files within specified directories (DCIM, PRIVATE, or full volume / custom folder).
+    Filters out non-media system files automatically using multi-layer media filter.
     Always returns normalized paths.
     """
     norm_source = normalize_win_path(source_root)
@@ -203,6 +202,7 @@ def filter_source_files(
             for f in files:
                 if not f.startswith('.'):
                     full_f = normalize_win_path(os.path.join(root, f))
-                    collected_files.append(full_f)
+                    if is_media_file(full_f):
+                        collected_files.append(full_f)
 
     return collected_files
