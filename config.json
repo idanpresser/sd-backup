@@ -1,11 +1,12 @@
 {
-  "source_path": "F:\\DCIM",
+  "source_path": "D:\\backup\\DCIM",
   "target_directory": "D:\\All_Media_Aug26",
-  "custom_suffix": "IdanPresser(C)",
+  "custom_suffix": "AnatKP(C)",
   "fastcopy_path": "",
   "subfolder_options": {
     "dcim": true,
     "private": true,
-    "full_volume": true
+    "full_volume": true,
+    "move_mode": true
   }
 }
