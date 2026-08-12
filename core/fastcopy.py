@@ -1,13 +1,68 @@
 """
 FastCopy CLI Subprocess Driver for SD-FastBackup.
-Resolves executable location (FastCopy.exe or fcp.exe), formats UTF-8 manifest files, and executes high-speed copy operations.
+Resolves executable location (FastCopy.exe or fcp.exe), formats UTF-8 manifest files,
+executes high-speed copy operations, and parses real-time stdout progress metrics.
 """
 import os
+import re
 import sys
 import shutil
 import tempfile
 import subprocess
-from typing import List, Generator, Optional
+from typing import List, Generator, Optional, Dict, Any
+
+
+def parse_fastcopy_stdout_line(line: str) -> Dict[str, Any]:
+    """
+    Parses a single line of stdout from FastCopy / fcp.exe and extracts metrics.
+    Returns dict with keys:
+      - 'bytes_transferred': int
+      - 'total_bytes': int
+      - 'bytes_pct': float
+      - 'files_transferred': int
+      - 'total_files': int
+      - 'speed_str': str
+      - 'current_file': str
+    """
+    result = {}
+    if not line:
+        return result
+
+    # 1. Transferred bytes pattern: "Transferred : 5,420,100,000 / 15,041,261,487 Bytes (36.0%)"
+    bytes_match = re.search(r'Transferred\s*:\s*([\d,]+)\s*/\s*([\d,]+)\s*Bytes(?:\s*\(([\d\.]+)%\))?', line, re.IGNORECASE)
+    if bytes_match:
+        try:
+            trans_b = int(bytes_match.group(1).replace(',', ''))
+            tot_b = int(bytes_match.group(2).replace(',', ''))
+            result['bytes_transferred'] = trans_b
+            result['total_bytes'] = tot_b
+            if bytes_match.group(3):
+                result['bytes_pct'] = float(bytes_match.group(3))
+            elif tot_b > 0:
+                result['bytes_pct'] = round((trans_b / tot_b) * 100, 1)
+        except Exception:
+            pass
+
+    # 2. Transferred files pattern: "Transferred : 12 / 120 Files"
+    files_match = re.search(r'Transferred\s*:\s*([\d,]+)\s*/\s*([\d,]+)\s*Files', line, re.IGNORECASE)
+    if files_match:
+        try:
+            result['files_transferred'] = int(files_match.group(1).replace(',', ''))
+            result['total_files'] = int(files_match.group(2).replace(',', ''))
+        except Exception:
+            pass
+
+    # 3. Speed pattern: "Speed : 485.2 MB/s (00:00:15)"
+    speed_match = re.search(r'Speed\s*:\s*([\d\.]+\s*(?:B|KB|MB|GB|TB)/s)', line, re.IGNORECASE)
+    if speed_match:
+        result['speed_str'] = speed_match.group(1).strip()
+
+    # 4. Current file pattern: "Copying : C:\DCIM\100EOS\IMG_0001.JPG"
+    file_match = re.search(r'(?:Copying|Copied|Processing)\s*:\s*(.+)', line, re.IGNORECASE)
+    if file_match:
+        result['current_file'] = file_match.group(1).strip()
+
+    return result
 
 
 def resolve_fastcopy_executable(custom_path: Optional[str] = None) -> Optional[str]:
@@ -88,7 +143,6 @@ class FastCopyRunner:
         if not source_files:
             return 0
 
-        # Sanitize target_dir to avoid FastCopy trailing backslash quote escape bug e.g. /to="C:\Target\"
         target_dir = os.path.normpath(os.path.abspath(target_dir)).rstrip("\\/")
         os.makedirs(target_dir, exist_ok=True)
 
@@ -101,9 +155,10 @@ class FastCopyRunner:
                     rel_name = os.path.basename(norm_src)
                     dst = os.path.normpath(os.path.join(target_dir, rel_name))
                     shutil.copy2(norm_src, dst)
-                    yield f"[{idx}/{len(source_files)}] Copied: {rel_name}"
+                    yield f"Transferred : {idx} / {len(source_files)} Files"
+                    yield f"Copying : {rel_name}"
                 except Exception as e:
-                    yield f"[{idx}/{len(source_files)}] ERROR copying {src}: {e}"
+                    yield f"[ERROR] Copying {src}: {e}"
             return 0
 
         # FastCopy / fcp Manifest Copy

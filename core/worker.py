@@ -1,7 +1,7 @@
 """
 Multi-Threaded Backup Worker for SD-FastBackup.
 Orchestrates volume scanning, metadata extraction, deduplication, SQLite cataloging, 
-FastCopy staging execution, and instantaneous same-volume file renaming with collision avoidance.
+FastCopy staging execution, real-time stdout progress parsing, and same-volume file renaming.
 """
 import os
 import time
@@ -12,7 +12,7 @@ from PySide6.QtCore import QThread, Signal, QObject
 
 from core.metadata import MetadataExtractor
 from core.db import DatabaseManager
-from core.fastcopy import FastCopyRunner
+from core.fastcopy import FastCopyRunner, parse_fastcopy_stdout_line
 from utils.path_formatter import (
     filter_source_files, 
     format_full_target_path, 
@@ -26,9 +26,10 @@ class WorkerSignals(QObject):
     """Signals emitted by BackupWorker across thread boundaries."""
     scan_started = Signal(str)                                # (scan_root_path)
     scan_progress = Signal(int, int, str)                      # (current_count, total_count, current_filename)
-    duplicate_found = Signal(str, str, float)                  # (filename, composite_hash, size_bytes - float to prevent 32-bit overflow)
-    transfer_started = Signal(int, float)                      # (total_copy_files, total_copy_bytes - float to prevent 32-bit overflow)
+    duplicate_found = Signal(str, str, float)                  # (filename, composite_hash, size_bytes)
+    transfer_started = Signal(int, float)                      # (total_copy_files, total_copy_bytes)
     transfer_progress = Signal(int, int, str, int)             # (copied_files, total_copy_files, current_filename, file_pct)
+    transfer_metrics = Signal(dict)                           # (parsed_fastcopy_metrics_dict)
     transfer_line = Signal(str)                               # (stdout_output_line)
     read_error = Signal(str, str)                              # (file_path, error_details)
     finished = Signal(dict)                                   # (summary_dict)
@@ -119,7 +120,7 @@ class BackupWorker(QThread):
                 # Register in SQLite catalog
                 db.register_file(composite_hash, file_basename, rel_path, size, dt_iso, source_type)
 
-                # Format target destination path (preserving panorama/burst/stack subfolder structure)
+                # Format target destination path
                 base_target_dest = format_full_target_path(
                     self.target_dir, 
                     date_taken, 
@@ -152,9 +153,15 @@ class BackupWorker(QThread):
                         self._cleanup_staging(staging_dir)
                         db.checkpoint()
                         return
+                    
                     self.signals.transfer_line.emit(output_line)
 
-                # 5. Instant Same-Volume Move & Rename Phase with Collision Prevention
+                    # Real-time stdout metrics parsing (bytes written, speed MB/s, active file)
+                    metrics = parse_fastcopy_stdout_line(output_line)
+                    if metrics:
+                        self.signals.transfer_metrics.emit(metrics)
+
+                # 5. Instant Same-Volume Move & Rename Phase
                 for idx, (src_p, final_dst_p, h_val, f_size, rel_p) in enumerate(files_to_copy, start=1):
                     if self._is_cancelled:
                         self._cleanup_staging(staging_dir)
@@ -164,10 +171,7 @@ class BackupWorker(QThread):
                     orig_name = os.path.basename(src_p)
                     staged_file_path = os.path.join(staging_dir, orig_name)
 
-                    # Final path collision check to be 100% safe
                     resolved_dst_p = resolve_target_path_collision(final_dst_p)
-
-                    # Ensure target parent folder exists
                     os.makedirs(os.path.dirname(resolved_dst_p), exist_ok=True)
 
                     if os.path.exists(staged_file_path):

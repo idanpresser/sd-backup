@@ -221,6 +221,7 @@ class MainWindow(QMainWindow):
         self.worker.signals.duplicate_found.connect(self._on_duplicate_found)
         self.worker.signals.transfer_started.connect(self._on_transfer_started)
         self.worker.signals.transfer_progress.connect(self._on_transfer_progress)
+        self.worker.signals.transfer_metrics.connect(self._on_transfer_metrics)
         self.worker.signals.transfer_line.connect(self._on_transfer_line)
         self.worker.signals.read_error.connect(self._on_read_error)
         self.worker.signals.finished.connect(self._on_backup_finished)
@@ -241,16 +242,19 @@ class MainWindow(QMainWindow):
     def _on_scan_progress(self, current: int, total: int, filename: str):
         self.progress_panel.update_scan_progress(current, total, filename)
 
-    def _on_duplicate_found(self, filename: str, hash_val: str, size: int):
-        self.log_console.add_duplicate(filename, hash_val, size)
+    def _on_duplicate_found(self, filename: str, hash_val: str, size: float):
+        self.log_console.add_duplicate(filename, hash_val, int(size))
 
-    def _on_transfer_started(self, total_files: int, total_bytes: int):
+    def _on_transfer_started(self, total_files: int, total_bytes: float):
         self.progress_panel.reset_for_transfer(total_files, total_bytes)
         gb = total_bytes / (1024 ** 3)
         self.log_console.append_trace(f"🚀 FastCopy execution phase started ({total_files} files, {gb:.2f} GB)")
 
     def _on_transfer_progress(self, copied_count: int, total_files: int, current_filename: str, file_pct: int):
         self.progress_panel.update_transfer_progress(copied_count, total_files, current_filename, file_pct)
+
+    def _on_transfer_metrics(self, metrics: dict):
+        self.progress_panel.update_realtime_metrics(metrics)
 
     def _on_transfer_line(self, line: str):
         self.log_console.append_trace(line)

@@ -1,6 +1,6 @@
 """
 Dual Progress Bar Component for SD-FastBackup.
-Displays Overall Progress %, Current File Progress %, Transfer Speed, and File Counter.
+Displays Overall Progress %, Current File Progress %, Transfer Speed (MB/s), and Bytes Written / Total Bytes.
 """
 from PySide6.QtWidgets import QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar
 
@@ -10,6 +10,7 @@ class ProgressPanelWidget(QGroupBox):
 
     def __init__(self, parent=None):
         super().__init__("BACKUP PIPELINE PROGRESS", parent)
+        self.total_bytes = 0
         self._init_ui()
 
     def _init_ui(self):
@@ -44,15 +45,16 @@ class ProgressPanelWidget(QGroupBox):
         layout.addLayout(file_layout)
 
         # 4. Details / Speed Indicator
-        self.details_label = QLabel("Files: 0 / 0 | Bytes: 0 B | Status: Ready")
+        self.details_label = QLabel("Files: 0 / 0 | Bytes: 0 B | Speed: --")
         self.details_label.setStyleSheet("color: #00ADB5; font-size: 12px;")
         layout.addWidget(self.details_label)
 
     def reset_progress(self):
+        self.total_bytes = 0
         self.overall_bar.setValue(0)
         self.file_bar.setValue(0)
         self.status_label.setText("Status: Starting pipeline...")
-        self.details_label.setText("Files: 0 / 0 | Bytes: 0 B | Status: Preparing...")
+        self.details_label.setText("Files: 0 / 0 | Bytes: 0 B | Speed: --")
 
     def update_scan_progress(self, current: int, total: int, filename: str):
         pct = int((current / total * 100)) if total > 0 else 0
@@ -61,19 +63,43 @@ class ProgressPanelWidget(QGroupBox):
         self.status_label.setText(f"Status [Scanning {current}/{total}]: {filename}")
         self.details_label.setText(f"Scanned: {current} / {total} files")
 
-    def reset_for_transfer(self, total_files: int, total_bytes: int):
+    def reset_for_transfer(self, total_files: int, total_bytes: float):
+        self.total_bytes = total_bytes
         gb = total_bytes / (1024 ** 3)
         self.overall_bar.setValue(0)
         self.file_bar.setValue(0)
-        self.status_label.setText(f"Status: Transferring {total_files} files ({gb:.2f} GB)...")
-        self.details_label.setText(f"Copied: 0 / {total_files} files | Total: {gb:.2f} GB")
+        self.status_label.setText(f"Status: FastCopy batch transferring {total_files} files ({gb:.2f} GB)...")
+        self.details_label.setText(f"Transferred: 0.00 / {gb:.2f} GB | Speed: --")
+
+    def update_realtime_metrics(self, metrics: dict):
+        """Updates progress bars and speed label using parsed FastCopy stdout metrics."""
+        bytes_trans = metrics.get("bytes_transferred")
+        tot_bytes = metrics.get("total_bytes") or self.total_bytes
+        pct = metrics.get("bytes_pct")
+        speed = metrics.get("speed_str", "")
+        current_file = metrics.get("current_file", "")
+
+        if pct is not None:
+            self.overall_bar.setValue(int(pct))
+            self.file_bar.setValue(int(pct))
+
+        if current_file:
+            self.status_label.setText(f"Status [FastCopy]: {current_file}")
+
+        if bytes_trans is not None and tot_bytes > 0:
+            trans_gb = bytes_trans / (1024 ** 3)
+            tot_gb = tot_bytes / (1024 ** 3)
+            detail = f"Transferred: {trans_gb:.2f} GB / {tot_gb:.2f} GB ({pct or 0:.1f}%)"
+            if speed:
+                detail += f" | Speed: {speed}"
+            self.details_label.setText(detail)
 
     def update_transfer_progress(self, copied_count: int, total_files: int, current_filename: str, file_pct: int = 100):
         overall_pct = int((copied_count / total_files * 100)) if total_files > 0 else 0
         self.overall_bar.setValue(overall_pct)
         self.file_bar.setValue(file_pct)
-        self.status_label.setText(f"Status [Copying {copied_count}/{total_files}]: {current_filename}")
-        self.details_label.setText(f"Copied: {copied_count} / {total_files} files ({overall_pct}%)")
+        self.status_label.setText(f"Status [Finalizing {copied_count}/{total_files}]: {current_filename}")
+        self.details_label.setText(f"Finalized: {copied_count} / {total_files} files ({overall_pct}%)")
 
     def update_overall(self, current: int, total: int, status_msg: str = ""):
         self.update_scan_progress(current, total, status_msg)
