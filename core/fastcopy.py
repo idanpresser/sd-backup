@@ -88,7 +88,8 @@ class FastCopyRunner:
         if not source_files:
             return 0
 
-        target_dir = os.path.normpath(os.path.abspath(target_dir))
+        # Sanitize target_dir to avoid FastCopy trailing backslash quote escape bug e.g. /to="C:\Target\"
+        target_dir = os.path.normpath(os.path.abspath(target_dir)).rstrip("\\/")
         os.makedirs(target_dir, exist_ok=True)
 
         if not self.exe_path:

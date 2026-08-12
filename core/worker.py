@@ -1,7 +1,7 @@
 """
 Multi-Threaded Backup Worker for SD-FastBackup.
 Orchestrates volume scanning, metadata extraction, deduplication, SQLite cataloging, 
-FastCopy staging execution, and instantaneous same-volume file renaming.
+FastCopy staging execution, and instantaneous same-volume file renaming with collision avoidance.
 """
 import os
 import time
@@ -13,7 +13,12 @@ from PySide6.QtCore import QThread, Signal, QObject
 from core.metadata import MetadataExtractor
 from core.db import DatabaseManager
 from core.fastcopy import FastCopyRunner
-from utils.path_formatter import filter_source_files, format_full_target_path, normalize_win_path
+from utils.path_formatter import (
+    filter_source_files, 
+    format_full_target_path, 
+    resolve_target_path_collision, 
+    normalize_win_path
+)
 from utils.drive_detector import get_drive_volume_info
 
 
@@ -55,7 +60,7 @@ class BackupWorker(QThread):
             db = DatabaseManager(self.target_dir)
             fastcopy = FastCopyRunner(self.fastcopy_path)
 
-            # Staging directory on the target drive for fastcopy batching
+            # Staging directory on target drive for fastcopy batching
             staging_dir = os.path.join(self.target_dir, ".sd_staging")
             os.makedirs(staging_dir, exist_ok=True)
 
@@ -115,13 +120,14 @@ class BackupWorker(QThread):
                 db.register_file(composite_hash, file_basename, rel_path, size, dt_iso, source_type)
 
                 # Format target destination path (preserving panorama/burst/stack subfolder structure)
-                target_destination = format_full_target_path(
+                base_target_dest = format_full_target_path(
                     self.target_dir, 
                     date_taken, 
                     file_basename, 
                     suffix=self.custom_suffix,
                     original_rel_path=rel_path
                 )
+                target_destination = resolve_target_path_collision(base_target_dest)
 
                 # Deduplication Check
                 if db.is_file_copied(composite_hash):
@@ -129,7 +135,7 @@ class BackupWorker(QThread):
                     self.signals.duplicate_found.emit(file_basename, composite_hash, size)
                     db.update_transfer_status(composite_hash, norm_file_path, target_destination, 'DUPLICATE_SKIPPED')
                 else:
-                    files_to_copy.append((norm_file_path, target_destination, composite_hash, size))
+                    files_to_copy.append((norm_file_path, target_destination, composite_hash, size, rel_path))
                     total_copy_bytes += size
 
             # 4. FastCopy Batch Staging Transfer Phase
@@ -148,8 +154,8 @@ class BackupWorker(QThread):
                         return
                     self.signals.transfer_line.emit(output_line)
 
-                # 5. Instant Same-Volume Move & Rename Phase
-                for idx, (src_p, final_dst_p, h_val, f_size) in enumerate(files_to_copy, start=1):
+                # 5. Instant Same-Volume Move & Rename Phase with Collision Prevention
+                for idx, (src_p, final_dst_p, h_val, f_size, rel_p) in enumerate(files_to_copy, start=1):
                     if self._is_cancelled:
                         self._cleanup_staging(staging_dir)
                         db.checkpoint()
@@ -158,19 +164,20 @@ class BackupWorker(QThread):
                     orig_name = os.path.basename(src_p)
                     staged_file_path = os.path.join(staging_dir, orig_name)
 
+                    # Final path collision check to be 100% safe
+                    resolved_dst_p = resolve_target_path_collision(final_dst_p)
+
                     # Ensure target parent folder exists
-                    os.makedirs(os.path.dirname(final_dst_p), exist_ok=True)
+                    os.makedirs(os.path.dirname(resolved_dst_p), exist_ok=True)
 
                     if os.path.exists(staged_file_path):
-                        # Instant rename on same drive
-                        shutil.move(staged_file_path, final_dst_p)
+                        shutil.move(staged_file_path, resolved_dst_p)
                     elif os.path.exists(src_p):
-                        # Fallback if fastcopy wasn't used or skipped file
-                        shutil.copy2(src_p, final_dst_p)
+                        shutil.copy2(src_p, resolved_dst_p)
 
-                    db.update_transfer_status(h_val, src_p, final_dst_p, 'COPIED')
+                    db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
                     copied_count += 1
-                    self.signals.transfer_progress.emit(copied_count, total_copy_files, os.path.basename(final_dst_p), 100)
+                    self.signals.transfer_progress.emit(copied_count, total_copy_files, os.path.basename(resolved_dst_p), 100)
 
             self._cleanup_staging(staging_dir)
 

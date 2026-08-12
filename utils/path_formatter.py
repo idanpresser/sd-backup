@@ -1,6 +1,6 @@
 """
 Path formatting utilities for SD-FastBackup.
-Organizes destination directories, preserves panorama/burst/stack subfolders, and enforces Windows backslashes.
+Organizes destination directories, preserves panorama/burst/stack subfolders, and resolves filename collisions.
 """
 import os
 import re
@@ -14,12 +14,12 @@ STACK_KEYWORDS = {"PANO", "PANORAMA", "BURST", "HDR", "STACK", "TIMELAPSE", "STE
 
 
 def normalize_win_path(path_str: str) -> str:
-    """Normalizes slashes to Windows backslashes '\\' on Windows systems."""
+    """Normalizes slashes to Windows backslashes '\\' on Windows systems, removing trailing backslashes for CLI arguments."""
     if not path_str:
         return ""
     norm = os.path.normpath(path_str)
     if sys.platform == "win32" or os.name == "nt":
-        return norm.replace("/", "\\")
+        norm = norm.replace("/", "\\")
     return norm
 
 
@@ -31,7 +31,7 @@ def sanitize_path(path_str: str) -> str:
 
 def format_target_relative_dir(dt: datetime) -> str:
     """
-    Formats directory structure relative to target root: YYYY/YYYY-MM/YYYY-MM-DD (or YYYY\\YYYY-MM\\YYYY-MM-DD on Windows).
+    Formats directory structure relative to target root: YYYY/YYYY-MM/YYYY-MM-DD
     """
     year = dt.strftime("%Y")
     year_month = dt.strftime("%Y-%m")
@@ -95,6 +95,26 @@ def format_full_target_path(
     return normalize_win_path(full_p)
 
 
+def resolve_target_path_collision(target_path: str) -> str:
+    """
+    If target_path already exists on disk, appends _1, _2, _3 counter to filename to avoid overwriting.
+    """
+    if not os.path.exists(target_path):
+        return normalize_win_path(target_path)
+
+    parent_dir = os.path.dirname(target_path)
+    filename = os.path.basename(target_path)
+    stem, ext = os.path.splitext(filename)
+
+    counter = 1
+    new_target = os.path.join(parent_dir, f"{stem}_{counter}{ext}")
+    while os.path.exists(new_target):
+        counter += 1
+        new_target = os.path.join(parent_dir, f"{stem}_{counter}{ext}")
+
+    return normalize_win_path(new_target)
+
+
 def filter_source_files(
     source_root: str, 
     include_dcim: bool = True, 
@@ -111,8 +131,6 @@ def filter_source_files(
 
     collected_files = []
     
-    # If source is a specific directory chosen directly by user (or full_volume is set)
-    # or if neither DCIM nor PRIVATE exists inside source_root: scan full directory tree
     has_dcim = os.path.exists(os.path.join(norm_source, "DCIM"))
     has_private = os.path.exists(os.path.join(norm_source, "PRIVATE"))
 
