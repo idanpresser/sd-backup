@@ -52,6 +52,38 @@ class DatabaseManager:
                     transferred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(composite_hash) REFERENCES file_catalog(composite_hash)
                 );
+
+                CREATE TABLE IF NOT EXISTS file_metadata (
+                    metadata_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    composite_hash TEXT UNIQUE NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    camera_make TEXT,
+                    camera_model TEXT,
+                    lens_model TEXT,
+                    serial_number TEXT,
+                    iso INTEGER,
+                    aperture TEXT,
+                    shutter_speed TEXT,
+                    focal_length TEXT,
+                    white_balance TEXT,
+                    width INTEGER,
+                    height INTEGER,
+                    aspect_ratio TEXT,
+                    color_space TEXT,
+                    video_codec TEXT,
+                    container_format TEXT,
+                    frame_rate REAL,
+                    duration_seconds REAL,
+                    bitrate INTEGER,
+                    audio_codec TEXT,
+                    audio_channels INTEGER,
+                    audio_sample_rate INTEGER,
+                    latitude REAL,
+                    longitude REAL,
+                    altitude REAL,
+                    raw_json TEXT,
+                    FOREIGN KEY(composite_hash) REFERENCES file_catalog(composite_hash)
+                );
             """)
 
     def register_volume(self, volume_serial: str, volume_label: str):
@@ -73,6 +105,62 @@ class DatabaseManager:
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(composite_hash) DO NOTHING
             """, (composite_hash, filename, rel_path, size, date_taken, source))
+
+    def register_metadata(self, composite_hash: str, filename: str, metadata: Dict[str, Any]):
+        """Registers or updates extended image/video metadata in file_metadata table."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO file_metadata (
+                    composite_hash, original_filename, camera_make, camera_model, lens_model, serial_number,
+                    iso, aperture, shutter_speed, focal_length, white_balance, width, height, aspect_ratio,
+                    color_space, video_codec, container_format, frame_rate, duration_seconds, bitrate,
+                    audio_codec, audio_channels, audio_sample_rate, latitude, longitude, altitude, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(composite_hash) DO UPDATE SET
+                    original_filename=excluded.original_filename,
+                    camera_make=excluded.camera_make,
+                    camera_model=excluded.camera_model,
+                    lens_model=excluded.lens_model,
+                    serial_number=excluded.serial_number,
+                    iso=excluded.iso,
+                    aperture=excluded.aperture,
+                    shutter_speed=excluded.shutter_speed,
+                    focal_length=excluded.focal_length,
+                    white_balance=excluded.white_balance,
+                    width=excluded.width,
+                    height=excluded.height,
+                    aspect_ratio=excluded.aspect_ratio,
+                    color_space=excluded.color_space,
+                    video_codec=excluded.video_codec,
+                    container_format=excluded.container_format,
+                    frame_rate=excluded.frame_rate,
+                    duration_seconds=excluded.duration_seconds,
+                    bitrate=excluded.bitrate,
+                    audio_codec=excluded.audio_codec,
+                    audio_channels=excluded.audio_channels,
+                    audio_sample_rate=excluded.audio_sample_rate,
+                    latitude=excluded.latitude,
+                    longitude=excluded.longitude,
+                    altitude=excluded.altitude,
+                    raw_json=excluded.raw_json
+            """, (
+                composite_hash, filename,
+                metadata.get("camera_make"), metadata.get("camera_model"), metadata.get("lens_model"), metadata.get("serial_number"),
+                metadata.get("iso"), metadata.get("aperture"), metadata.get("shutter_speed"), metadata.get("focal_length"), metadata.get("white_balance"),
+                metadata.get("width"), metadata.get("height"), metadata.get("aspect_ratio"), metadata.get("color_space"),
+                metadata.get("video_codec"), metadata.get("container_format"), metadata.get("frame_rate"), metadata.get("duration_seconds"), metadata.get("bitrate"),
+                metadata.get("audio_codec"), metadata.get("audio_channels"), metadata.get("audio_sample_rate"),
+                metadata.get("latitude"), metadata.get("longitude"), metadata.get("altitude"),
+                metadata.get("raw_json", "{}")
+            ))
+
+    def get_metadata(self, composite_hash: str) -> Optional[Dict[str, Any]]:
+        """Returns metadata for a given composite_hash, or None if not found."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM file_metadata WHERE composite_hash = ?", (composite_hash,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     def update_transfer_status(self, composite_hash: str, source_path: str, dest_path: str, status: str):
         """Records or updates a transfer attempt in transfer_manifest."""
@@ -117,7 +205,17 @@ class DatabaseManager:
             """)
             return [dict(row) for row in cursor.fetchall()]
 
+    def delete_file_record(self, composite_hash: str):
+        """Deletes a file and its associated metadata/manifest entries by composite_hash."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM transfer_manifest WHERE composite_hash = ?", (composite_hash,))
+            cursor.execute("DELETE FROM file_metadata WHERE composite_hash = ?", (composite_hash,))
+            cursor.execute("DELETE FROM file_catalog WHERE composite_hash = ?", (composite_hash,))
+
     def checkpoint(self):
         """Runs a WAL checkpoint to flush WAL logs to disk."""
         with self._get_connection() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+
+

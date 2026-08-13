@@ -139,6 +139,14 @@ class BackupWorker(QThread):
             dt_iso = dt_taken.isoformat()
 
             db.register_file(comp_hash, fname, rel_path, fsize, dt_iso, "MTP_PHONE")
+            try:
+                mtp_meta = {
+                    "camera_make": dev_name,
+                    "raw_json": json.dumps({"source": "MTP_PHONE", "name": fname, "size": fsize, "date_taken": dt_iso})
+                }
+                db.register_metadata(comp_hash, fname, mtp_meta)
+            except Exception:
+                pass
 
             base_target_dest = format_full_target_path(
                 self.target_dir,
@@ -173,6 +181,12 @@ class BackupWorker(QThread):
                 if success:
                     copied_count += 1
                     db.update_transfer_status(h_val, f"{dev_name}\\{orig_fname}", resolved_dst, 'COPIED')
+                    try:
+                        extracted_meta = MetadataExtractor.extract_full_metadata(resolved_dst)
+                        extracted_meta["camera_make"] = extracted_meta.get("camera_make") or dev_name
+                        db.register_metadata(h_val, orig_fname, extracted_meta)
+                    except Exception:
+                        pass
                     self.signals.transfer_line.emit(f"📱 MTP Transferred: {os.path.basename(resolved_dst)}")
                     self.signals.transfer_progress.emit(copied_count, total_copy_files, os.path.basename(resolved_dst), 100)
                 else:
@@ -246,6 +260,11 @@ class BackupWorker(QThread):
             dt_iso = date_taken.isoformat()
 
             db.register_file(composite_hash, file_basename, rel_path, size, dt_iso, source_type)
+            try:
+                full_meta = MetadataExtractor.extract_full_metadata(norm_file_path)
+                db.register_metadata(composite_hash, file_basename, full_meta)
+            except Exception as meta_ex:
+                logging.warning(f"Could not extract full metadata for '{file_basename}': {meta_ex}")
 
             base_target_dest = format_full_target_path(
                 self.target_dir, 

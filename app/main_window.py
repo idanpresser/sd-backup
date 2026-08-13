@@ -18,10 +18,12 @@ from app.components.drive_selector import DriveSelectorWidget
 from app.components.progress_panel import ProgressPanelWidget
 from app.components.log_console import LogConsoleWidget
 from app.components.alert_banner import AlertBannerWidget
+from app.components.db_viewer import DBCatalogDialog
 from core.worker import BackupWorker
 from core.logger import QtSignalingLogHandler
 from core.mtp_engine import is_mtp_path
 from utils.path_formatter import normalize_win_path
+
 
 
 class MainWindow(QMainWindow):
@@ -114,9 +116,28 @@ class MainWindow(QMainWindow):
         """)
         self.cancel_btn.clicked.connect(self.cancel_backup)
 
+        self.db_btn = QPushButton("🗃️ View Database Catalog...")
+        self.db_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2C3E50;
+                color: #FFFFFF;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 10px 18px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #34495E;
+                color: #00ADB5;
+            }
+        """)
+        self.db_btn.clicked.connect(self.open_db_catalog)
+
         action_layout.addWidget(self.start_btn, 2)
+        action_layout.addWidget(self.db_btn, 1)
         action_layout.addWidget(self.cancel_btn, 1)
         main_layout.addLayout(action_layout)
+
 
         # 5. Dual Progress Meter Widget
         self.progress_panel = ProgressPanelWidget(self)
@@ -241,7 +262,24 @@ class MainWindow(QMainWindow):
 
         self.worker.start()
 
+    def open_db_catalog(self):
+        """Opens Database Catalog Manager dialog for target directory."""
+        target_dir = self.drive_selector.get_target_directory()
+        if not target_dir:
+            self.alert_banner.show_alert("Please select a target backup destination directory first.", level="WARNING")
+            return
+        if not os.path.exists(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception:
+                self.alert_banner.show_alert(f"Target directory '{target_dir}' does not exist.", level="WARNING")
+                return
+
+        dialog = DBCatalogDialog(target_dir, parent=self)
+        dialog.exec()
+
     def cancel_backup(self):
+
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.log_console.append_trace("⚠️ Backup cancellation requested by user...")

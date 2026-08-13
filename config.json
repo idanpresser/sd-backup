@@ -1,12 +1,12 @@
 {
-  "source_path": "MTP:\\OPPO Find X9 Ultra\\Internal shared storage\\DCIM",
+  "source_path": "D:\\backup\\DCIM\\Camera",
   "target_directory": "D:\\All_Media_Aug26",
-  "custom_suffix": "IdanPresser(C)",
+  "custom_suffix": "EyalPresser(C)",
   "fastcopy_path": "",
   "subfolder_options": {
     "dcim": true,
     "private": true,
     "full_volume": true,
-    "move_mode": false
+    "move_mode": true
   }
 }

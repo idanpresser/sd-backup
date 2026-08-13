@@ -31,3 +31,18 @@ def test_composite_hash_calculation(sample_file):
     expected_hash = hashlib.sha256(f"{iso_date}_{size}".encode('utf-8')).hexdigest()
     assert composite_hash == expected_hash
     assert source in ["EXIF", "MEDIAINFO", "MTIME"]
+
+def test_extract_full_metadata_structure(sample_file):
+    meta = MetadataExtractor.extract_full_metadata(sample_file)
+    assert isinstance(meta, dict)
+    assert "camera_make" in meta
+    assert "camera_model" in meta
+    assert "iso" in meta
+    assert "aperture" in meta
+    assert "shutter_speed" in meta
+    assert "white_balance" in meta
+    assert "width" in meta
+    assert "height" in meta
+    assert "raw_json" in meta
+    assert meta["raw_json"] == "{}"
+
