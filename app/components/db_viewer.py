@@ -440,6 +440,12 @@ class DBCatalogWidget(QWidget):
         visible_cnt = 0
 
         has_wildcard = ('*' in query or '?' in query)
+        pattern = query
+        if has_wildcard:
+            if not pattern.startswith('*'):
+                pattern = f"*{pattern}"
+            if not pattern.endswith('*'):
+                pattern = f"{pattern}*"
 
         for i in range(self.table.rowCount()):
             row_data = self.rows_data[i]
@@ -456,7 +462,6 @@ class DBCatalogWidget(QWidget):
             if not query:
                 is_match = True
             elif has_wildcard:
-                pattern = query if (query.startswith('*') or query.endswith('*')) else f"*{query}*"
                 is_match = (
                     fnmatch.fnmatchcase(composite_blob, pattern) or
                     any(fnmatch.fnmatchcase(field, pattern) for field in search_fields)
@@ -471,6 +476,7 @@ class DBCatalogWidget(QWidget):
                 self.table.setRowHidden(i, True)
 
         self.status_label.setText(f"Showing {visible_cnt} of {len(self.rows_data)} records")
+
 
 
     def _on_row_selected(self):

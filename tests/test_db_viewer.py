@@ -138,10 +138,40 @@ def test_case_invariant_and_wildcard_search(qapp, sample_db_env):
     widget._apply_filter()
     assert widget.table.isRowHidden(0) is False
 
-    # 4. Non-matching wildcard
-    widget.search_input.setText("photo_???.jpg")
+def test_search_leading_asterisk_substring(qapp, sample_db_env):
+    root_dir, db = sample_db_env
+
+    # Register an additional sample file with Anat in filename
+    hash_val = "anat_test_hash"
+    db.register_file(hash_val, "DSC_0001_AnatKP(C).JPG", "DCIM/DSC_0001_AnatKP(C).JPG", 3000000, "2026-08-13T11:00:00", "EXIF")
+    db.update_transfer_status(hash_val, "E:/DSC_0001_AnatKP(C).JPG", os.path.join(root_dir, "DSC_0001_AnatKP(C).JPG"), "COPIED")
+    db.checkpoint()
+
+    widget = DBCatalogWidget(target_dir=root_dir)
+
+    # 1. Searching for "*anat" should find "DSC_0001_AnatKP(C).JPG"
+    widget.search_input.setText("*anat")
     widget._apply_filter()
-    assert widget.table.isRowHidden(0) is True
+
+    anat_row = -1
+    for row in range(widget.table.rowCount()):
+        if widget.table.item(row, 1) and "Anat" in widget.table.item(row, 1).text():
+            anat_row = row
+            break
+
+    assert anat_row != -1
+    assert widget.table.isRowHidden(anat_row) is False
+
+    # 2. Searching for "*anat*"
+    widget.search_input.setText("*anat*")
+    widget._apply_filter()
+    assert widget.table.isRowHidden(anat_row) is False
+
+    # 3. Searching for "*0001*"
+    widget.search_input.setText("*0001*")
+    widget._apply_filter()
+    assert widget.table.isRowHidden(anat_row) is False
+
 
 
 
