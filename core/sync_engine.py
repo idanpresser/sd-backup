@@ -93,14 +93,22 @@ def calculate_sync_diff(root_dir: str) -> Dict[str, Any]:
 def execute_sync(
     root_dir: str,
     remove_missing: bool = True,
-    add_uncataloged: bool = True
+    add_uncataloged: bool = True,
+    uncataloged_action: str = "ADD_TO_DB"
 ) -> Dict[str, int]:
     """
     Executes synchronization actions between disk storage and SQLite catalog based on options.
 
+    Args:
+        root_dir: Target backup directory path
+        remove_missing: If True, purges catalog records for missing disk files
+        add_uncataloged: Backwards compatibility boolean (if True and uncataloged_action default, adds to DB)
+        uncataloged_action: Action for untracked disk files ("ADD_TO_DB", "DELETE_FROM_DISK", "IGNORE")
+
     Returns dict with summary counts:
         'removed_records': int
         'added_records': int
+        'deleted_disk_files': int
         'errors': int
     """
     norm_root = normalize_win_path(os.path.abspath(root_dir))
@@ -109,6 +117,7 @@ def execute_sync(
 
     removed_count = 0
     added_count = 0
+    deleted_disk_count = 0
     errors = 0
 
     # 1. Remove missing records from SQLite DB
@@ -127,31 +136,51 @@ def execute_sync(
                     errors += 1
             conn.commit()
 
-    # 2. Add uncataloged files into SQLite DB
-    if add_uncataloged and diff["uncataloged_files"]:
+    # Determine active action for uncataloged files
+    effective_action = uncataloged_action
+    if not add_uncataloged and uncataloged_action == "ADD_TO_DB":
+        effective_action = "IGNORE"
+
+    # 2. Process uncataloged files on disk
+    if diff["uncataloged_files"] and effective_action != "IGNORE":
         for item in diff["uncataloged_files"]:
             full_p = item["file_path"]
-            comp_hash = item["composite_hash"]
-            fname = os.path.basename(full_p)
-            rel_p = item["relative_path"]
-            size = item["file_size"]
-            dt_iso = item["date_taken"].isoformat()
-            src = item["source_type"]
 
-            try:
-                db.register_file(comp_hash, fname, rel_p, size, dt_iso, src)
-                db.update_transfer_status(comp_hash, full_p, full_p, "COPIED")
-                meta = MetadataExtractor.extract_full_metadata(full_p)
-                db.register_metadata(comp_hash, fname, meta)
-                added_count += 1
-            except Exception as e:
-                logging.error(f"Error adding uncataloged file '{full_p}' to DB: {e}")
-                errors += 1
+            if effective_action == "ADD_TO_DB":
+                comp_hash = item["composite_hash"]
+                fname = os.path.basename(full_p)
+                rel_p = item["relative_path"]
+                size = item["file_size"]
+                dt_iso = item["date_taken"].isoformat()
+                src = item["source_type"]
+
+                try:
+                    db.register_file(comp_hash, fname, rel_p, size, dt_iso, src)
+                    db.update_transfer_status(comp_hash, full_p, full_p, "COPIED")
+                    meta = MetadataExtractor.extract_full_metadata(full_p)
+                    db.register_metadata(comp_hash, fname, meta)
+                    added_count += 1
+                except Exception as e:
+                    logging.error(f"Error adding uncataloged file '{full_p}' to DB: {e}")
+                    errors += 1
+
+            elif effective_action == "DELETE_FROM_DISK":
+                if os.path.exists(full_p):
+                    try:
+                        import stat
+                        os.chmod(full_p, stat.S_IWRITE | stat.S_IWUSR)
+                        os.remove(full_p)
+                        deleted_disk_count += 1
+                    except Exception as e:
+                        logging.error(f"Error deleting uncataloged file '{full_p}' from disk: {e}")
+                        errors += 1
 
     db.checkpoint()
 
     return {
         "removed_records": removed_count,
         "added_records": added_count,
+        "deleted_disk_files": deleted_disk_count,
         "errors": errors
     }
+

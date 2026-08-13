@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Any
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSplitter, QTextEdit, QMessageBox, QCheckBox, QGroupBox, QListWidget, QListWidgetItem,
+    QSplitter, QTextEdit, QMessageBox, QCheckBox, QRadioButton, QGroupBox, QListWidget, QListWidgetItem,
     QFileDialog, QFormLayout
 )
 from PySide6.QtCore import Qt, QTimer
@@ -121,7 +121,7 @@ class DBSyncDialog(QDialog):
         super().__init__(parent)
         self.target_dir = target_dir
         self.setWindowTitle("Database & Disk Synchronization")
-        self.resize(750, 500)
+        self.resize(780, 520)
         self._init_ui()
         self._load_preview()
 
@@ -151,21 +151,35 @@ class DBSyncDialog(QDialog):
 
         layout.addWidget(splitter, 1)
 
-        # Options
-        options_layout = QHBoxLayout()
-        self.chk_remove_missing = QCheckBox("Purge missing file records from DB catalog")
-        self.chk_remove_missing.setChecked(True)
-        self.chk_add_uncataloged = QCheckBox("Index uncataloged disk files into DB catalog")
-        self.chk_add_uncataloged.setChecked(True)
+        # Options Box
+        opts_group = QGroupBox("Synchronization Actions")
+        opts_box = QVBoxLayout(opts_group)
 
-        options_layout.addWidget(self.chk_remove_missing)
-        options_layout.addWidget(self.chk_add_uncataloged)
-        layout.addLayout(options_layout)
+        self.chk_remove_missing = QCheckBox("❌ Purge missing file records from DB catalog")
+        self.chk_remove_missing.setChecked(True)
+        opts_box.addWidget(self.chk_remove_missing)
+
+        uncat_label = QLabel("<b>Action for new uncataloged files found on disk:</b>")
+        uncat_label.setStyleSheet("margin-top: 6px;")
+        opts_box.addWidget(uncat_label)
+
+        uncat_options_layout = QHBoxLayout()
+        self.radio_add_uncataloged = QRadioButton("➕ Index into DB catalog")
+        self.radio_add_uncataloged.setChecked(True)
+        self.radio_delete_uncataloged = QRadioButton("🔥 Delete from target disk folder")
+        self.radio_ignore_uncataloged = QRadioButton("🙈 Ignore")
+
+        uncat_options_layout.addWidget(self.radio_add_uncataloged)
+        uncat_options_layout.addWidget(self.radio_delete_uncataloged)
+        uncat_options_layout.addWidget(self.radio_ignore_uncataloged)
+        opts_box.addLayout(uncat_options_layout)
+
+        layout.addWidget(opts_group)
 
         # Buttons
         btn_box = QHBoxLayout()
         self.btn_apply = QPushButton("⚡ Apply Synchronization")
-        self.btn_apply.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; padding: 6px 14px;")
+        self.btn_apply.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; padding: 7px 16px;")
         self.btn_apply.clicked.connect(self._on_apply_sync)
 
         btn_cancel = QPushButton("Cancel")
@@ -201,25 +215,47 @@ class DBSyncDialog(QDialog):
 
     def _on_apply_sync(self):
         remove_missing = self.chk_remove_missing.isChecked()
-        add_uncataloged = self.chk_add_uncataloged.isChecked()
 
-        if not remove_missing and not add_uncataloged:
-            QMessageBox.information(self, "No Options Selected", "Please check at least one sync action.")
+        uncat_action = "ADD_TO_DB"
+        if self.radio_delete_uncataloged.isChecked():
+            uncat_action = "DELETE_FROM_DISK"
+        elif self.radio_ignore_uncataloged.isChecked():
+            uncat_action = "IGNORE"
+
+        if not remove_missing and uncat_action == "IGNORE":
+            QMessageBox.information(self, "No Actions Selected", "Please select at least one sync action.")
             return
+
+        if uncat_action == "DELETE_FROM_DISK":
+            reply = QMessageBox.warning(
+                self,
+                "Confirm Disk Deletion ⚠️",
+                "You selected 'Delete from target disk folder' for uncataloged files.\n\nThis will PERMANENTLY delete physical files from your storage target folder!\n\nAre you sure you want to proceed?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
 
         try:
             stats = execute_sync(
                 self.target_dir,
                 remove_missing=remove_missing,
-                add_uncataloged=add_uncataloged
+                uncataloged_action=uncat_action
             )
-            msg = f"Synchronization Complete!\n\n• Removed Records: {stats['removed_records']}\n• Added Records: {stats['added_records']}"
+            msg = (
+                f"Synchronization Complete! 🎉\n\n"
+                f"• Purged DB Records: {stats['removed_records']}\n"
+                f"• Indexed DB Records: {stats['added_records']}\n"
+                f"• Deleted Disk Files: {stats['deleted_disk_files']}"
+            )
             if stats['errors'] > 0:
                 msg += f"\n• Errors: {stats['errors']}"
             QMessageBox.information(self, "Sync Success", msg)
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Sync Failed", f"Failed to execute synchronization: {e}")
+
 
 
 class DBCatalogWidget(QWidget):
@@ -311,19 +347,27 @@ class DBCatalogWidget(QWidget):
         splitter.setSizes([750, 350])
         main_layout.addWidget(splitter, 1)
 
-        # Bottom Bar: Row count + Delete Button
+        # Bottom Bar: Row count + Delete Buttons
         bottom_bar = QHBoxLayout()
         self.status_label = QLabel("0 records")
         self.status_label.setStyleSheet("color: #7f8c8d;")
 
-        btn_delete = QPushButton("🗑️ Purge Selected Record")
-        btn_delete.setStyleSheet("background-color: #c0392b; color: white; padding: 5px 12px;")
-        btn_delete.clicked.connect(self._on_delete_selected)
+        self.btn_purge_db = QPushButton("🗑️ Purge Record from DB")
+        self.btn_purge_db.setToolTip("Purges SQLite database record only (keeps physical file on disk)")
+        self.btn_purge_db.setStyleSheet("background-color: #d35400; color: white; padding: 5px 12px;")
+        self.btn_purge_db.clicked.connect(self._on_delete_selected)
+
+        self.btn_delete_disk_db = QPushButton("🔥 Delete File from Disk & DB")
+        self.btn_delete_disk_db.setToolTip("Permanently deletes physical file from disk and purges SQLite catalog record")
+        self.btn_delete_disk_db.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold; padding: 5px 12px;")
+        self.btn_delete_disk_db.clicked.connect(self._on_delete_disk_and_db)
 
         bottom_bar.addWidget(self.status_label)
         bottom_bar.addStretch()
-        bottom_bar.addWidget(btn_delete)
+        bottom_bar.addWidget(self.btn_purge_db)
+        bottom_bar.addWidget(self.btn_delete_disk_db)
         main_layout.addLayout(bottom_bar)
+
 
     def _on_search_text_changed(self):
         """Restarts the 400ms single-shot timer to debounce typing/backspacing."""
@@ -481,6 +525,41 @@ class DBCatalogWidget(QWidget):
                 self.reload_catalog()
             except Exception as e:
                 QMessageBox.critical(self, "Purge Error", f"Failed to delete record: {e}")
+
+    def _on_delete_disk_and_db(self):
+        selected = self.table.selectedIndexes()
+        if not selected:
+            QMessageBox.information(self, "Select Record", "Please select a record row to delete.")
+            return
+
+        row_idx = selected[0].row()
+        data = self.rows_data[row_idx]
+        h_val = data["composite_hash"]
+        fname = data["original_filename"]
+        dest_path = data["destination_path"]
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Disk & DB Deletion ⚠️",
+            f"Are you sure you want to PERMANENTLY delete physical file '{fname}' from disk and purge its DB catalog record?\n\nTarget File Path: {dest_path or 'N/A'}\n\nTHIS ACTION CANNOT BE UNDONE!",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes and self.db:
+            try:
+                if dest_path and os.path.exists(dest_path):
+                    import stat
+                    os.chmod(dest_path, stat.S_IWRITE | stat.S_IWUSR)
+                    os.remove(dest_path)
+
+                self.db.delete_file_record(h_val)
+                self.db.checkpoint()
+                self.reload_catalog()
+                QMessageBox.information(self, "Deleted", f"Successfully deleted '{fname}' from disk and catalog.")
+            except Exception as e:
+                QMessageBox.critical(self, "Delete Error", f"Failed to delete file/record: {e}")
+
 
     def _open_renamer_dialog(self):
         if not self.target_dir or not os.path.exists(self.target_dir):

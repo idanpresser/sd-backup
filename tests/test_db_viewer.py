@@ -101,3 +101,22 @@ def test_search_timer_debouncing(qapp, sample_db_env):
     assert widget.search_timer.interval() >= 300
 
 
+def test_db_sync_dialog_uncataloged_options(qapp, sample_db_env):
+    root_dir, db = sample_db_env
+    sync_dialog = DBSyncDialog(target_dir=root_dir)
+
+    assert hasattr(sync_dialog, "radio_add_uncataloged")
+    assert hasattr(sync_dialog, "radio_delete_uncataloged")
+    assert hasattr(sync_dialog, "radio_ignore_uncataloged")
+    assert sync_dialog.radio_add_uncataloged.isChecked() is True
+
+
+def test_db_catalog_widget_delete_buttons(qapp, sample_db_env):
+    root_dir, db = sample_db_env
+    widget = DBCatalogWidget(target_dir=root_dir)
+
+    assert hasattr(widget, "btn_purge_db")
+    assert hasattr(widget, "btn_delete_disk_db")
+
+
+

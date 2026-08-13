@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 bin/*.log
+bin/FSViewer*/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
@@ -11,4 +12,5 @@ bin/*.log
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
 

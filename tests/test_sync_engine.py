@@ -61,8 +61,8 @@ def test_sync_engine_executes_sync(temp_sync_env):
         f.write("untracked video data")
     db.checkpoint()
 
-    # Execute sync
-    stats = execute_sync(root_dir, remove_missing=True, add_uncataloged=True)
+    # Execute sync with default ADD_TO_DB
+    stats = execute_sync(root_dir, remove_missing=True, uncataloged_action="ADD_TO_DB")
 
     assert stats["removed_records"] == 1
     assert stats["added_records"] == 1
@@ -71,3 +71,21 @@ def test_sync_engine_executes_sync(temp_sync_env):
     # Verify untracked file was indexed into catalog
     comp_hash, _, _, _ = MetadataExtractor.compute_composite_hash(untracked_abs)
     assert db.is_file_copied(comp_hash)
+
+
+def test_sync_engine_deletes_uncataloged_disk_files(temp_sync_env):
+    root_dir, db = temp_sync_env
+
+    # Place a garbage / uncataloged file on target disk
+    junk_path = os.path.join(root_dir, "LEFTOVER_JUNK.JPG")
+    with open(junk_path, "w") as f:
+        f.write("junk data to remove")
+
+    assert os.path.exists(junk_path)
+
+    # Execute sync with DELETE_FROM_DISK action
+    stats = execute_sync(root_dir, remove_missing=False, uncataloged_action="DELETE_FROM_DISK")
+
+    assert stats["deleted_disk_files"] == 1
+    assert not os.path.exists(junk_path)
+
