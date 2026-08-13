@@ -61,3 +61,43 @@ def test_pil_exif_image_metadata_extraction(tmp_path):
     assert meta["raw_json"] != "{}"
 
 
+def test_exiftool_cli_extraction(tmp_path, monkeypatch):
+    import json
+    import subprocess
+
+    sample_img = str(tmp_path / "SAMPLE_DRONE.JPG")
+    with open(sample_img, "w") as f:
+        f.write("dummy drone image")
+
+    exiftool_output = [{
+        "EXIF:Make": "DJI",
+        "EXIF:Model": "FC3582",
+        "EXIF:LensModel": "DJI 24mm F2.8",
+        "EXIF:ISO": 100,
+        "EXIF:FNumber": 2.8,
+        "EXIF:ExposureTime": "1/500",
+        "EXIF:FocalLength": "24.0 mm",
+        "Composite:ImageSize": "4000x3000"
+    }]
+
+    class DummyCompletedProcess:
+        stdout = json.dumps(exiftool_output)
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: DummyCompletedProcess())
+    monkeypatch.setattr("shutil.which", lambda cmd: "C:/bin/exiftool.exe" if "exiftool" in cmd else None)
+
+    meta = MetadataExtractor.extract_full_metadata(sample_img)
+
+    assert meta["camera_make"] == "DJI"
+    assert meta["camera_model"] == "FC3582"
+    assert meta["lens_model"] == "DJI 24mm F2.8"
+    assert meta["iso"] == 100
+    assert meta["aperture"] == "f/2.8"
+    assert meta["shutter_speed"] == "1/500"
+    assert meta["width"] == 4000
+    assert meta["height"] == 3000
+
+
+

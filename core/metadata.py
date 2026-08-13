@@ -149,11 +149,150 @@ class MetadataExtractor:
         return composite_hash, size, date_taken, source
 
     @classmethod
+    def _extract_exiftool_metadata(cls, file_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Attempts metadata extraction using Phil Harvey's ExifTool CLI utility if available in PATH or bin/.
+        """
+        import shutil
+        import subprocess
+
+        exiftool_path = shutil.which("exiftool") or shutil.which("exiftool.exe")
+        if not exiftool_path:
+            bin_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
+            candidate = os.path.join(bin_dir, "exiftool.exe")
+            if os.path.exists(candidate):
+                exiftool_path = candidate
+
+        if not exiftool_path:
+            return None
+
+        try:
+            cmd = [exiftool_path, "-json", "-G", file_path]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+            data_list = json.loads(res.stdout)
+            if not data_list or not isinstance(data_list, list):
+                return None
+
+            tags = data_list[0]
+            if not isinstance(tags, dict):
+                return None
+
+            meta: Dict[str, Any] = {
+                "camera_make": None,
+                "camera_model": None,
+                "lens_model": None,
+                "serial_number": None,
+                "iso": None,
+                "aperture": None,
+                "shutter_speed": None,
+                "focal_length": None,
+                "white_balance": None,
+                "width": None,
+                "height": None,
+                "aspect_ratio": None,
+                "color_space": None,
+                "video_codec": None,
+                "container_format": None,
+                "frame_rate": None,
+                "duration_seconds": None,
+                "bitrate": None,
+                "audio_codec": None,
+                "audio_channels": None,
+                "audio_sample_rate": None,
+                "latitude": None,
+                "longitude": None,
+                "altitude": None,
+                "raw_json": json.dumps(tags, default=str)
+            }
+
+            def get_tag(*keys):
+                for k in keys:
+                    if k in tags:
+                        return tags[k]
+                    for full_k, v in tags.items():
+                        if full_k.endswith(":" + k) or full_k == k:
+                            return v
+                return None
+
+            meta["camera_make"] = str(get_tag("Make", "EXIF:Make") or "").strip() or None
+            meta["camera_model"] = str(get_tag("Model", "EXIF:Model") or "").strip() or None
+            meta["lens_model"] = str(get_tag("LensModel", "EXIF:LensModel", "LensInfo") or "").strip() or None
+            meta["serial_number"] = str(get_tag("SerialNumber", "BodySerialNumber", "EXIF:SerialNumber") or "").strip() or None
+
+            iso_val = get_tag("ISO", "EXIF:ISO")
+            if iso_val:
+                try:
+                    meta["iso"] = int(str(iso_val).split()[0])
+                except Exception:
+                    pass
+
+            aperture_val = get_tag("FNumber", "EXIF:FNumber", "ApertureValue")
+            if aperture_val:
+                try:
+                    fnum = float(aperture_val)
+                    meta["aperture"] = f"f/{fnum:.1f}" if fnum > 0 else str(aperture_val)
+                except Exception:
+                    meta["aperture"] = str(aperture_val)
+
+            shutter_val = get_tag("ExposureTime", "EXIF:ExposureTime", "ShutterSpeedValue")
+            if shutter_val:
+                meta["shutter_speed"] = str(shutter_val).strip()
+
+            focal_val = get_tag("FocalLength", "EXIF:FocalLength")
+            if focal_val:
+                meta["focal_length"] = str(focal_val).strip()
+
+            wb_val = get_tag("WhiteBalance", "EXIF:WhiteBalance")
+            if wb_val:
+                meta["white_balance"] = str(wb_val).strip()
+
+            img_size = get_tag("ImageSize", "Composite:ImageSize")
+            if img_size and 'x' in str(img_size):
+                parts = str(img_size).split('x')
+                try:
+                    meta["width"] = int(parts[0])
+                    meta["height"] = int(parts[1])
+                    if meta["width"] and meta["height"] != 0:
+                        meta["aspect_ratio"] = f"{meta['width']}:{meta['height']}"
+                except Exception:
+                    pass
+
+            if not meta["width"]:
+                w_val = get_tag("ImageWidth", "EXIF:ExifImageWidth", "File:ImageWidth")
+                h_val = get_tag("ImageHeight", "EXIF:ExifImageLength", "File:ImageHeight")
+                if w_val and h_val:
+                    try:
+                        meta["width"] = int(w_val)
+                        meta["height"] = int(h_val)
+                        if meta["width"] and meta["height"] != 0:
+                            meta["aspect_ratio"] = f"{meta['width']}:{meta['height']}"
+                    except Exception:
+                        pass
+
+            lat_val = get_tag("GPSLatitude", "Composite:GPSLatitude")
+            lon_val = get_tag("GPSLongitude", "Composite:GPSLongitude")
+            if lat_val and lon_val:
+                try:
+                    meta["latitude"] = float(lat_val)
+                    meta["longitude"] = float(lon_val)
+                except Exception:
+                    pass
+
+            return meta
+        except Exception:
+            return None
+
+    @classmethod
     def extract_full_metadata(cls, file_path: str) -> Dict[str, Any]:
         """
         Extracts comprehensive EXIF (photos) or MediaInfo (videos) metadata tags.
         Returns a dictionary with structured attribute values and 'raw_json'.
         """
+        # Tier 0: ExifTool CLI (Phil Harvey's ExifTool) if available in PATH or bin/
+        exiftool_meta = cls._extract_exiftool_metadata(file_path)
+        if exiftool_meta and (exiftool_meta.get("camera_make") or exiftool_meta.get("raw_json") != "{}"):
+            return exiftool_meta
+
         meta: Dict[str, Any] = {
             "camera_make": None,
             "camera_model": None,
@@ -186,6 +325,7 @@ class MetadataExtractor:
 
         # 1. Image EXIF Extraction
         if ext in cls.IMAGE_EXTENSIONS:
+
             # 1A. ExifRead Tier
             try:
                 with open(file_path, 'rb') as f:
