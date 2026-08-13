@@ -32,17 +32,32 @@ def test_composite_hash_calculation(sample_file):
     assert composite_hash == expected_hash
     assert source in ["EXIF", "MEDIAINFO", "MTIME"]
 
-def test_extract_full_metadata_structure(sample_file):
-    meta = MetadataExtractor.extract_full_metadata(sample_file)
-    assert isinstance(meta, dict)
-    assert "camera_make" in meta
-    assert "camera_model" in meta
-    assert "iso" in meta
-    assert "aperture" in meta
-    assert "shutter_speed" in meta
-    assert "white_balance" in meta
-    assert "width" in meta
-    assert "height" in meta
-    assert "raw_json" in meta
-    assert meta["raw_json"] == "{}"
+def test_pil_exif_image_metadata_extraction(tmp_path):
+    from PIL import Image
+
+    img_path = str(tmp_path / "TEST_EXIF_IMAGE.JPG")
+    img = Image.new('RGB', (1920, 1080), color='blue')
+
+    # Create EXIF dictionary using Pillow Exif
+    exif = img.getexif()
+    exif[271] = "Sony"                # Make
+    exif[272] = "ILCE-7RM4"           # Model
+    exif[42036] = "FE 24-70mm F2.8 GM" # LensModel
+    exif[34855] = 400                 # ISOSpeedRatings
+    exif[33437] = 2.8                 # FNumber
+    exif[33434] = (1, 1000)           # ExposureTime (1/1000)
+    exif[37386] = (50, 1)             # FocalLength (50mm)
+    img.save(img_path, exif=exif)
+
+    meta = MetadataExtractor.extract_full_metadata(img_path)
+
+    assert meta["camera_make"] == "Sony"
+    assert meta["camera_model"] == "ILCE-7RM4"
+    assert meta["lens_model"] == "FE 24-70mm F2.8 GM"
+    assert meta["iso"] == 400
+    assert meta["aperture"] == "f/2.8"
+    assert meta["width"] == 1920
+    assert meta["height"] == 1080
+    assert meta["raw_json"] != "{}"
+
 

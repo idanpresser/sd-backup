@@ -186,6 +186,7 @@ class MetadataExtractor:
 
         # 1. Image EXIF Extraction
         if ext in cls.IMAGE_EXTENSIONS:
+            # 1A. ExifRead Tier
             try:
                 with open(file_path, 'rb') as f:
                     tags = exifread.process_file(f, details=False)
@@ -252,9 +253,60 @@ class MetadataExtractor:
 
                     raw_dict = {k: str(v) for k, v in tags.items()}
                     meta["raw_json"] = json.dumps(raw_dict, default=str)
-                    return meta
             except Exception:
                 pass
+
+            # 1B. Pillow (PIL.Image) Fallback / Supplement Tier
+            try:
+                from PIL import Image, ExifTags
+                with Image.open(file_path) as img:
+                    if not meta["width"] or not meta["height"]:
+                        w, h = img.size
+                        meta["width"] = meta["width"] or w
+                        meta["height"] = meta["height"] or h
+                        if meta["width"] and meta["height"] and meta["height"] != 0:
+                            meta["aspect_ratio"] = meta["aspect_ratio"] or f"{meta['width']}:{meta['height']}"
+
+                    exif_data = img.getexif()
+                    if exif_data:
+                        tag_dict = {}
+                        for tag_id, val in exif_data.items():
+                            tag_name = ExifTags.TAGS.get(tag_id, str(tag_id))
+                            tag_dict[tag_name] = str(val)
+
+                            if tag_id == 271 or tag_name == 'Make':
+                                meta["camera_make"] = meta["camera_make"] or str(val).strip()
+                            elif tag_id == 272 or tag_name == 'Model':
+                                meta["camera_model"] = meta["camera_model"] or str(val).strip()
+                            elif tag_id == 42036 or tag_name in ('LensModel', 'LensInfo'):
+                                meta["lens_model"] = meta["lens_model"] or str(val).strip()
+                            elif tag_id == 42033 or tag_name in ('BodySerialNumber', 'SerialNumber'):
+                                meta["serial_number"] = meta["serial_number"] or str(val).strip()
+                            elif tag_id == 34855 or tag_name in ('ISOSpeedRatings', 'PhotographicSensitivity'):
+                                if not meta["iso"]:
+                                    try:
+                                        meta["iso"] = int(val[0] if isinstance(val, (list, tuple)) else val)
+                                    except Exception:
+                                        pass
+                            elif tag_id == 33437 or tag_name == 'FNumber':
+                                if not meta["aperture"]:
+                                    fnum = _parse_exif_ratio(val)
+                                    meta["aperture"] = f"f/{fnum:.1f}" if fnum > 0 else str(val)
+                            elif tag_id == 33434 or tag_name == 'ExposureTime':
+                                if not meta["shutter_speed"]:
+                                    meta["shutter_speed"] = str(val).strip()
+                            elif tag_id == 37386 or tag_name == 'FocalLength':
+                                if not meta["focal_length"]:
+                                    flen = _parse_exif_ratio(val)
+                                    meta["focal_length"] = f"{flen:.1f}mm" if flen > 0 else str(val)
+
+                        if tag_dict and meta["raw_json"] == "{}":
+                            meta["raw_json"] = json.dumps(tag_dict, default=str)
+            except Exception:
+                pass
+
+            return meta
+
 
         # 2. Video MediaInfo Extraction
         if ext in cls.VIDEO_EXTENSIONS:

@@ -626,7 +626,7 @@ class DBCatalogWidget(QWidget):
             return
 
         try:
-            count = self.db.backfill_missing_metadata()
+            count = self.db.backfill_missing_metadata(force_reextract=True)
             self.reload_catalog()
             QMessageBox.information(
                 self,
@@ -635,6 +635,7 @@ class DBCatalogWidget(QWidget):
             )
         except Exception as e:
             QMessageBox.critical(self, "Extraction Error", f"Failed to extract missing metadata: {e}")
+
 
 
 
