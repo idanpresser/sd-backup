@@ -5,6 +5,7 @@ batch suffix renaming, single/batch row purging, and disk-catalog synchronizatio
 """
 import os
 import json
+import fnmatch
 import logging
 from typing import Optional, List, Dict, Any
 
@@ -20,6 +21,7 @@ from PySide6.QtGui import QFont, QIcon
 from core.db import DatabaseManager
 from core.sync_engine import calculate_sync_diff, execute_sync
 from utils.maintenance import rename_suffix_in_backup
+
 
 
 class SuffixRenamerDialog(QDialog):
@@ -437,17 +439,39 @@ class DBCatalogWidget(QWidget):
         query = self.search_input.text().strip().lower()
         visible_cnt = 0
 
+        has_wildcard = ('*' in query or '?' in query)
+
         for i in range(self.table.rowCount()):
             row_data = self.rows_data[i]
-            search_blob = f"{row_data['original_filename']} {row_data['relative_path']} {row_data['date_taken']} {row_data['camera_make']} {row_data['camera_model']} {row_data['copy_status']}".lower()
+            fname = (row_data.get('original_filename') or "").lower()
+            rel_p = (row_data.get('relative_path') or "").lower()
+            dt_taken = str(row_data.get('date_taken') or "").lower()
+            camera = f"{row_data.get('camera_make') or ''} {row_data.get('camera_model') or ''}".strip().lower()
+            status = (row_data.get('copy_status') or "").lower()
+            dest_p = (row_data.get('destination_path') or "").lower()
 
-            if not query or query in search_blob:
+            search_fields = [fname, rel_p, dt_taken, camera, status, dest_p]
+            composite_blob = " ".join(search_fields)
+
+            if not query:
+                is_match = True
+            elif has_wildcard:
+                pattern = query if (query.startswith('*') or query.endswith('*')) else f"*{query}*"
+                is_match = (
+                    fnmatch.fnmatchcase(composite_blob, pattern) or
+                    any(fnmatch.fnmatchcase(field, pattern) for field in search_fields)
+                )
+            else:
+                is_match = query in composite_blob
+
+            if is_match:
                 self.table.setRowHidden(i, False)
                 visible_cnt += 1
             else:
                 self.table.setRowHidden(i, True)
 
         self.status_label.setText(f"Showing {visible_cnt} of {len(self.rows_data)} records")
+
 
     def _on_row_selected(self):
         selected = self.table.selectedIndexes()

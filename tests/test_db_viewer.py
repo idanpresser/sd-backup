@@ -119,4 +119,30 @@ def test_db_catalog_widget_delete_buttons(qapp, sample_db_env):
     assert hasattr(widget, "btn_delete_disk_db")
 
 
+def test_case_invariant_and_wildcard_search(qapp, sample_db_env):
+    root_dir, db = sample_db_env
+    widget = DBCatalogWidget(target_dir=root_dir)
+
+    # 1. Uppercase match (sample contains PHOTO_01.JPG and Canon EOS R5)
+    widget.search_input.setText("CANON EOS")
+    widget._apply_filter()
+    assert widget.table.isRowHidden(0) is False
+
+    # 2. Wildcard asterisk * match
+    widget.search_input.setText("photo_*.jpg")
+    widget._apply_filter()
+    assert widget.table.isRowHidden(0) is False
+
+    # 3. Wildcard question mark ? match
+    widget.search_input.setText("photo_??.jpg")
+    widget._apply_filter()
+    assert widget.table.isRowHidden(0) is False
+
+    # 4. Non-matching wildcard
+    widget.search_input.setText("photo_???.jpg")
+    widget._apply_filter()
+    assert widget.table.isRowHidden(0) is True
+
+
+
 
