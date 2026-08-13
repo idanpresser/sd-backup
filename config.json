@@ -1,7 +1,7 @@
 {
-  "source_path": "D:\\backup\\DCIM\\Camera",
-  "target_directory": "D:\\All_Media_Aug26",
-  "custom_suffix": "EyalPresser(C)",
+  "source_path": "I:\\Backup",
+  "target_directory": "I:\\All_Media_Aug26",
+  "custom_suffix": "AnatKP(C)",
   "fastcopy_path": "",
   "subfolder_options": {
     "dcim": true,

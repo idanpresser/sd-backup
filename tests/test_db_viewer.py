@@ -8,7 +8,8 @@ import shutil
 import pytest
 
 from PySide6.QtWidgets import QApplication
-from app.components.db_viewer import DBCatalogDialog, DBSyncDialog
+from app.components.db_viewer import DBCatalogWidget, DBSyncDialog
+from app.main_window import MainWindow
 from core.db import DatabaseManager
 
 
@@ -42,29 +43,28 @@ def sample_db_env(tmp_path):
     return root_dir, db
 
 
-def test_db_catalog_dialog_creation_and_load(qapp, sample_db_env):
+def test_db_catalog_widget_creation_and_load(qapp, sample_db_env):
     root_dir, db = sample_db_env
-    dialog = DBCatalogDialog(target_dir=root_dir)
+    widget = DBCatalogWidget(target_dir=root_dir)
 
-    assert dialog is not None
-    assert dialog.windowTitle() == "Database Catalog Manager"
-    assert dialog.table.rowCount() == 1
-    assert dialog.table.item(0, 1).text() == "PHOTO_01.JPG"
+    assert widget is not None
+    assert widget.table.rowCount() == 1
+    assert widget.table.item(0, 1).text() == "PHOTO_01.JPG"
 
 
-def test_db_catalog_dialog_filter(qapp, sample_db_env):
+def test_db_catalog_widget_filter(qapp, sample_db_env):
     root_dir, db = sample_db_env
-    dialog = DBCatalogDialog(target_dir=root_dir)
+    widget = DBCatalogWidget(target_dir=root_dir)
 
     # Filter with non-matching text
-    dialog.search_input.setText("NON_EXISTENT_FILE")
-    dialog._apply_filter()
-    assert dialog.table.isRowHidden(0) is True
+    widget.search_input.setText("NON_EXISTENT_FILE")
+    widget._apply_filter()
+    assert widget.table.isRowHidden(0) is True
 
     # Clear filter
-    dialog.search_input.setText("PHOTO")
-    dialog._apply_filter()
-    assert dialog.table.isRowHidden(0) is False
+    widget.search_input.setText("PHOTO")
+    widget._apply_filter()
+    assert widget.table.isRowHidden(0) is False
 
 
 def test_db_sync_dialog_preview(qapp, sample_db_env):
@@ -73,3 +73,31 @@ def test_db_sync_dialog_preview(qapp, sample_db_env):
 
     assert sync_dialog is not None
     assert "Database & Disk Synchronization" in sync_dialog.windowTitle()
+
+
+def test_main_window_tab_widget(qapp, sample_db_env):
+    root_dir, db = sample_db_env
+    window = MainWindow()
+    assert hasattr(window, "tab_widget")
+    assert window.tab_widget.count() == 2
+    assert window.tab_widget.tabText(0) == "⚡ Backup Launcher"
+    assert window.tab_widget.tabText(1) == "🗃️ Database Catalog"
+
+
+def test_suffix_renamer_dialog(qapp, sample_db_env):
+    root_dir, db = sample_db_env
+    from app.components.db_viewer import SuffixRenamerDialog
+    dialog = SuffixRenamerDialog(target_dir=root_dir)
+
+    assert dialog is not None
+    assert "Batch Suffix Renamer" in dialog.windowTitle()
+
+
+def test_search_timer_debouncing(qapp, sample_db_env):
+    root_dir, db = sample_db_env
+    widget = DBCatalogWidget(target_dir=root_dir)
+
+    assert hasattr(widget, "search_timer")
+    assert widget.search_timer.interval() >= 300
+
+

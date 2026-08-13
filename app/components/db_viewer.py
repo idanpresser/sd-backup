@@ -1,7 +1,7 @@
 """
-PySide6 Database Catalog Manager GUI & Sync Dialog for SD-FastBackup.
-Provides SQLite catalog inspection, live search & filtering, detailed EXIF/MediaInfo inspector panel,
-single/batch row deletion, and DB-Disk synchronization with preview diffs.
+PySide6 Database Catalog Manager GUI, Suffix Renamer Dialog & Sync Dialog for SD-FastBackup.
+Provides catalog table browsing, debounced search filtering, metadata inspection,
+batch suffix renaming, single/batch row purging, and disk-catalog synchronization.
 """
 import os
 import json
@@ -11,13 +11,107 @@ from typing import Optional, List, Dict, Any
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSplitter, QTextEdit, QMessageBox, QCheckBox, QGroupBox, QListWidget, QListWidgetItem
+    QSplitter, QTextEdit, QMessageBox, QCheckBox, QGroupBox, QListWidget, QListWidgetItem,
+    QFileDialog, QFormLayout
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QIcon
 
 from core.db import DatabaseManager
 from core.sync_engine import calculate_sync_diff, execute_sync
+from utils.maintenance import rename_suffix_in_backup
+
+
+class SuffixRenamerDialog(QDialog):
+    """Modal dialog for batch renaming file suffixes on disk and updating SQLite database catalog."""
+
+    def __init__(self, target_dir: str, parent=None):
+        super().__init__(parent)
+        self.target_dir = target_dir
+        self.setWindowTitle("Batch Suffix Renamer")
+        self.resize(520, 260)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        info_label = QLabel(f"<b>Target Backup Directory:</b> {self.target_dir}")
+        info_label.setStyleSheet("font-size: 13px; margin-bottom: 5px;")
+        layout.addWidget(info_label)
+
+        form_layout = QFormLayout()
+
+        self.old_suffix_input = QLineEdit()
+        self.old_suffix_input.setPlaceholderText("e.g. AnatKP(C)")
+        form_layout.addRow("Old Suffix to Replace:", self.old_suffix_input)
+
+        self.new_suffix_input = QLineEdit()
+        self.new_suffix_input.setPlaceholderText("e.g. IdanPresser(C)")
+        form_layout.addRow("New Replacement Suffix:", self.new_suffix_input)
+
+        file_list_layout = QHBoxLayout()
+        self.file_list_input = QLineEdit()
+        self.file_list_input.setPlaceholderText("Optional text file listing specific files...")
+        btn_browse_list = QPushButton("Browse...")
+        btn_browse_list.clicked.connect(self._browse_file_list)
+        file_list_layout.addWidget(self.file_list_input, 1)
+        file_list_layout.addWidget(btn_browse_list)
+
+        form_layout.addRow("File List (Optional):", file_list_layout)
+        layout.addLayout(form_layout)
+
+        layout.addSpacing(10)
+
+        btn_box = QHBoxLayout()
+        self.btn_run = QPushButton("⚡ Execute Rename")
+        self.btn_run.setStyleSheet("background-color: #00ADB5; color: white; font-weight: bold; padding: 7px 16px;")
+        self.btn_run.clicked.connect(self._on_execute_rename)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_box.addStretch()
+        btn_box.addWidget(self.btn_run)
+        btn_box.addWidget(btn_cancel)
+        layout.addLayout(btn_box)
+
+    def _browse_file_list(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select File List", self.target_dir, "Text Files (*.txt);;All Files (*.*)"
+        )
+        if path:
+            self.file_list_input.setText(path)
+
+    def _on_execute_rename(self):
+        old_suf = self.old_suffix_input.text().strip()
+        new_suf = self.new_suffix_input.text().strip()
+        file_list = self.file_list_input.text().strip() or None
+
+        if not old_suf:
+            QMessageBox.warning(self, "Input Required", "Please enter the old suffix to replace.")
+            return
+
+        try:
+            stats = rename_suffix_in_backup(
+                root_dir=self.target_dir,
+                old_suffix=old_suf,
+                new_suffix=new_suf,
+                file_list_path=file_list
+            )
+
+            msg = (
+                f"Suffix Rename Operation Complete! 🎉\n\n"
+                f"• Scanned Files: {stats['scanned_count']}\n"
+                f"• Files Renamed: {stats['renamed_count']}\n"
+                f"• DB Catalog Records Updated: {stats['db_updated_count']}"
+            )
+            if stats['errors'] > 0:
+                msg += f"\n• Errors: {stats['errors']}"
+
+            QMessageBox.information(self, "Rename Success", msg)
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Rename Error", f"Failed to execute suffix rename: {e}")
 
 
 class DBSyncDialog(QDialog):
@@ -128,41 +222,63 @@ class DBSyncDialog(QDialog):
             QMessageBox.critical(self, "Sync Failed", f"Failed to execute synchronization: {e}")
 
 
-class DBCatalogDialog(QDialog):
-    """Main Database Catalog Viewer & Editor Dialog."""
+class DBCatalogWidget(QWidget):
+    """Main Database Catalog Manager Widget designed for embedding inside QTabWidget."""
 
-    def __init__(self, target_dir: str, parent=None):
+    def __init__(self, target_dir: str = "", parent=None):
         super().__init__(parent)
         self.target_dir = target_dir
-        self.db = DatabaseManager(self.target_dir)
+        self.db: Optional[DatabaseManager] = DatabaseManager(self.target_dir) if (self.target_dir and os.path.exists(self.target_dir)) else None
         self.rows_data: List[Dict[str, Any]] = []
 
-        self.setWindowTitle("Database Catalog Manager")
-        self.resize(1100, 650)
+        # Debounced search timer (400ms delay to avoid stutter while typing/backspacing)
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(400)
+        self.search_timer.timeout.connect(self._apply_filter)
+
         self._init_ui()
-        self._load_catalog()
+        if self.target_dir:
+            self.reload_catalog()
+
+    def set_target_dir(self, target_dir: str):
+        """Updates target directory and reloads catalog database."""
+        if self.target_dir != target_dir:
+            self.target_dir = target_dir
+            if self.target_dir and os.path.exists(self.target_dir):
+                self.db = DatabaseManager(self.target_dir)
+            else:
+                self.db = None
+            self.reload_catalog()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Top Bar: Directory label + Search + Buttons
+        # Top Control Bar: Directory label + Search input + Buttons
         top_bar = QHBoxLayout()
-        dir_label = QLabel(f"<b>Catalog:</b> {os.path.basename(self.target_dir)}/")
-        dir_label.setStyleSheet("font-size: 13px;")
+        self.dir_label = QLabel(f"<b>Catalog:</b> {os.path.basename(self.target_dir) or 'No target selected'}/")
+        self.dir_label.setStyleSheet("font-size: 13px;")
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 Search by filename, date taken, camera model, or copy status...")
-        self.search_input.textChanged.connect(self._apply_filter)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        self.search_input.returnPressed.connect(self._apply_filter)
+
+        btn_renamer = QPushButton("✏️ Batch Rename Suffixes...")
+        btn_renamer.setToolTip("Rename file suffixes on disk and update SQLite database catalog")
+        btn_renamer.clicked.connect(self._open_renamer_dialog)
 
         btn_sync = QPushButton("🔄 Sync with Disk...")
         btn_sync.setToolTip("Compare database catalog against target files on disk")
         btn_sync.clicked.connect(self._open_sync_dialog)
 
         btn_refresh = QPushButton("⚡ Refresh")
-        btn_refresh.clicked.connect(self._load_catalog)
+        btn_refresh.clicked.connect(self.reload_catalog)
 
-        top_bar.addWidget(dir_label)
+        top_bar.addWidget(self.dir_label)
         top_bar.addWidget(self.search_input, 1)
+        top_bar.addWidget(btn_renamer)
         top_bar.addWidget(btn_sync)
         top_bar.addWidget(btn_refresh)
         main_layout.addLayout(top_bar)
@@ -195,7 +311,7 @@ class DBCatalogDialog(QDialog):
         splitter.setSizes([750, 350])
         main_layout.addWidget(splitter, 1)
 
-        # Bottom Bar: Row count + Delete Button + Close
+        # Bottom Bar: Row count + Delete Button
         bottom_bar = QHBoxLayout()
         self.status_label = QLabel("0 records")
         self.status_label.setStyleSheet("color: #7f8c8d;")
@@ -204,18 +320,28 @@ class DBCatalogDialog(QDialog):
         btn_delete.setStyleSheet("background-color: #c0392b; color: white; padding: 5px 12px;")
         btn_delete.clicked.connect(self._on_delete_selected)
 
-        btn_close = QPushButton("Close")
-        btn_close.clicked.connect(self.accept)
-
         bottom_bar.addWidget(self.status_label)
         bottom_bar.addStretch()
         bottom_bar.addWidget(btn_delete)
-        bottom_bar.addWidget(btn_close)
         main_layout.addLayout(bottom_bar)
 
-    def _load_catalog(self):
+    def _on_search_text_changed(self):
+        """Restarts the 400ms single-shot timer to debounce typing/backspacing."""
+        self.search_timer.start()
+
+    def reload_catalog(self):
         self.table.setRowCount(0)
         self.rows_data.clear()
+
+        dir_name = os.path.basename(self.target_dir) if self.target_dir else "No target selected"
+        self.dir_label.setText(f"<b>Catalog:</b> {dir_name}/")
+
+        if not self.target_dir or not os.path.exists(self.target_dir):
+            self.status_label.setText("Select a valid target backup directory to view catalog.")
+            return
+
+        if not self.db:
+            self.db = DatabaseManager(self.target_dir)
 
         try:
             with self.db._get_connection() as conn:
@@ -348,15 +474,45 @@ class DBCatalogDialog(QDialog):
             QMessageBox.No
         )
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.Yes and self.db:
             try:
                 self.db.delete_file_record(h_val)
                 self.db.checkpoint()
-                self._load_catalog()
+                self.reload_catalog()
             except Exception as e:
                 QMessageBox.critical(self, "Purge Error", f"Failed to delete record: {e}")
 
+    def _open_renamer_dialog(self):
+        if not self.target_dir or not os.path.exists(self.target_dir):
+            QMessageBox.warning(self, "Target Required", "Please select a valid target backup directory first.")
+            return
+        dialog = SuffixRenamerDialog(self.target_dir, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            self.reload_catalog()
+
     def _open_sync_dialog(self):
+        if not self.target_dir or not os.path.exists(self.target_dir):
+            QMessageBox.warning(self, "Target Required", "Please select a valid target backup directory first.")
+            return
         dialog = DBSyncDialog(self.target_dir, parent=self)
         if dialog.exec() == QDialog.Accepted:
-            self._load_catalog()
+            self.reload_catalog()
+
+
+class DBCatalogDialog(QDialog):
+    """Dialog wrapper around DBCatalogWidget for popup usage."""
+
+    def __init__(self, target_dir: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Database Catalog Manager")
+        self.resize(1100, 650)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.catalog_widget = DBCatalogWidget(target_dir=target_dir, parent=self)
+        layout.addWidget(self.catalog_widget)
+
+        # Expose attributes for backward compatibility
+        self.table = self.catalog_widget.table
+        self.search_input = self.catalog_widget.search_input
+        self._apply_filter = self.catalog_widget._apply_filter

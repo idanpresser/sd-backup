@@ -1,6 +1,7 @@
 """
 Primary QMainWindow & Event Wiring for SD-FastBackup.
-Assembles DriveSelectorWidget, ProgressPanelWidget, LogConsoleWidget, and AlertBannerWidget.
+Assembles DriveSelectorWidget, ProgressPanelWidget, LogConsoleWidget, AlertBannerWidget,
+and embedded Database Catalog Manager inside a Tabbed User Interface.
 Handles configuration persistence and QThread worker lifecycle.
 """
 import os
@@ -10,7 +11,7 @@ from typing import Optional
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QPushButton, QMessageBox, QApplication
+    QLabel, QPushButton, QMessageBox, QApplication, QTabWidget
 )
 from PySide6.QtCore import Qt
 
@@ -18,22 +19,21 @@ from app.components.drive_selector import DriveSelectorWidget
 from app.components.progress_panel import ProgressPanelWidget
 from app.components.log_console import LogConsoleWidget
 from app.components.alert_banner import AlertBannerWidget
-from app.components.db_viewer import DBCatalogDialog
+from app.components.db_viewer import DBCatalogWidget
 from core.worker import BackupWorker
 from core.logger import QtSignalingLogHandler
 from core.mtp_engine import is_mtp_path
 from utils.path_formatter import normalize_win_path
 
 
-
 class MainWindow(QMainWindow):
-    """Primary Application Window for SD-FastBackup."""
+    """Primary Application Window for SD-FastBackup with Tabbed Architecture."""
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("SD-FastBackup")
-        self.resize(980, 760)
-        self.setMinimumSize(850, 640)
+        self.resize(1020, 800)
+        self.setMinimumSize(880, 680)
 
         self.config_path = config_path or os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
         self.worker: Optional[BackupWorker] = None
@@ -48,8 +48,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(12, 12, 12, 12)
 
         # 1. Header Banner
         header_layout = QHBoxLayout()
@@ -62,15 +62,47 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(subtitle_label, 1)
         main_layout.addLayout(header_layout)
 
-        # 2. Non-blocking Alert Banner
-        self.alert_banner = AlertBannerWidget(self)
-        main_layout.addWidget(self.alert_banner)
+        # 2. Main Tabbed Layout
+        self.tab_widget = QTabWidget(central_widget)
+        self.tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #333333;
+                background-color: #1E1E1E;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #2A2A2A;
+                color: #AAAAAA;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 8px 22px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #00ADB5;
+                color: #FFFFFF;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #383838;
+                color: #00FFF5;
+            }
+        """)
 
-        # 3. Source Drive & Setup Widget
-        self.drive_selector = DriveSelectorWidget(self)
-        main_layout.addWidget(self.drive_selector)
+        # --- TAB 1: Backup Engine ---
+        launcher_tab = QWidget()
+        launcher_layout = QVBoxLayout(launcher_tab)
+        launcher_layout.setSpacing(10)
+        launcher_layout.setContentsMargins(12, 12, 12, 12)
 
-        # 4. Control Buttons Row
+        self.alert_banner = AlertBannerWidget(launcher_tab)
+        launcher_layout.addWidget(self.alert_banner)
+
+        self.drive_selector = DriveSelectorWidget(launcher_tab)
+        launcher_layout.addWidget(self.drive_selector)
+
+        # Control Buttons Row
         action_layout = QHBoxLayout()
 
         self.start_btn = QPushButton("🚀 START BACKUP")
@@ -116,36 +148,31 @@ class MainWindow(QMainWindow):
         """)
         self.cancel_btn.clicked.connect(self.cancel_backup)
 
-        self.db_btn = QPushButton("🗃️ View Database Catalog...")
-        self.db_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2C3E50;
-                color: #FFFFFF;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 10px 18px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #34495E;
-                color: #00ADB5;
-            }
-        """)
-        self.db_btn.clicked.connect(self.open_db_catalog)
-
-        action_layout.addWidget(self.start_btn, 2)
-        action_layout.addWidget(self.db_btn, 1)
+        action_layout.addWidget(self.start_btn, 3)
         action_layout.addWidget(self.cancel_btn, 1)
-        main_layout.addLayout(action_layout)
+        launcher_layout.addLayout(action_layout)
 
+        self.progress_panel = ProgressPanelWidget(launcher_tab)
+        launcher_layout.addWidget(self.progress_panel)
 
-        # 5. Dual Progress Meter Widget
-        self.progress_panel = ProgressPanelWidget(self)
-        main_layout.addWidget(self.progress_panel)
+        self.log_console = LogConsoleWidget(launcher_tab)
+        launcher_layout.addWidget(self.log_console, 1)
 
-        # 6. Log Console Widget
-        self.log_console = LogConsoleWidget(self)
-        main_layout.addWidget(self.log_console, 1)
+        self.tab_widget.addTab(launcher_tab, "⚡ Backup Launcher")
+
+        # --- TAB 2: Database Catalog Manager ---
+        self.db_catalog_widget = DBCatalogWidget(target_dir="", parent=self)
+        self.tab_widget.addTab(self.db_catalog_widget, "🗃️ Database Catalog")
+
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+
+        main_layout.addWidget(self.tab_widget, 1)
+
+    def _on_tab_changed(self, index: int):
+        """When switching to Database Catalog tab, auto-sync target directory and refresh catalog."""
+        if index == 1:
+            target_dir = self.drive_selector.get_target_directory()
+            self.db_catalog_widget.set_target_dir(target_dir)
 
     def _setup_logging(self):
         """Routes Python logging output to System Trace Tab."""
@@ -171,7 +198,9 @@ class MainWindow(QMainWindow):
                         
                     target_dir = cfg.get("target_directory", "")
                     if target_dir:
-                        self.drive_selector.target_input.setText(normalize_win_path(target_dir))
+                        norm_target = normalize_win_path(target_dir)
+                        self.drive_selector.target_input.setText(norm_target)
+                        self.db_catalog_widget.set_target_dir(norm_target)
                         
                     suffix = cfg.get("custom_suffix", "")
                     if suffix:
@@ -262,24 +291,7 @@ class MainWindow(QMainWindow):
 
         self.worker.start()
 
-    def open_db_catalog(self):
-        """Opens Database Catalog Manager dialog for target directory."""
-        target_dir = self.drive_selector.get_target_directory()
-        if not target_dir:
-            self.alert_banner.show_alert("Please select a target backup destination directory first.", level="WARNING")
-            return
-        if not os.path.exists(target_dir):
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except Exception:
-                self.alert_banner.show_alert(f"Target directory '{target_dir}' does not exist.", level="WARNING")
-                return
-
-        dialog = DBCatalogDialog(target_dir, parent=self)
-        dialog.exec()
-
     def cancel_backup(self):
-
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.log_console.append_trace("⚠️ Backup cancellation requested by user...")
@@ -340,6 +352,10 @@ class MainWindow(QMainWindow):
         self.progress_panel.update_details(f"{copied} processed", f"{gb:.2f} GB")
 
         self.log_console.append_trace(f"✅ OPERATION COMPLETE: {details}")
+        
+        # Auto-refresh database catalog tab
+        target_dir = self.drive_selector.get_target_directory()
+        self.db_catalog_widget.set_target_dir(target_dir)
 
     def _on_backup_error(self, fatal_err: str):
         self.start_btn.setEnabled(True)
