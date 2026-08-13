@@ -213,9 +213,65 @@ class DatabaseManager:
             cursor.execute("DELETE FROM file_metadata WHERE composite_hash = ?", (composite_hash,))
             cursor.execute("DELETE FROM file_catalog WHERE composite_hash = ?", (composite_hash,))
 
+    def backfill_missing_metadata(self) -> int:
+        """
+        Scans file_catalog entries lacking file_metadata or with raw_json='{}'.
+        Reads files from target_dir on disk and populates file_metadata table.
+        Returns count of backfilled metadata records.
+        """
+        from core.metadata import MetadataExtractor
+        from utils.path_formatter import normalize_win_path
+
+        missing_items = []
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT fc.composite_hash, fc.original_filename, fc.relative_path, tm.destination_path
+                FROM file_catalog fc
+                LEFT JOIN file_metadata fm ON fc.composite_hash = fm.composite_hash
+                LEFT JOIN transfer_manifest tm ON fc.composite_hash = tm.composite_hash
+                WHERE fm.composite_hash IS NULL OR fm.raw_json = '{}' OR fm.raw_json IS NULL
+            """)
+            rows = cursor.fetchall()
+            for r in rows:
+                missing_items.append({
+                    "composite_hash": r["composite_hash"],
+                    "original_filename": r["original_filename"],
+                    "relative_path": r["relative_path"],
+                    "destination_path": r["destination_path"]
+                })
+
+        backfilled_count = 0
+        for item in missing_items:
+            h_val = item["composite_hash"]
+            fname = item["original_filename"]
+            dest_p = normalize_win_path(item["destination_path"]) if item["destination_path"] else ""
+
+            target_file_path = ""
+            if dest_p and os.path.exists(dest_p):
+                target_file_path = dest_p
+            elif item["relative_path"]:
+                rel_p = normalize_win_path(os.path.join(self.target_dir, item["relative_path"]))
+                if os.path.exists(rel_p):
+                    target_file_path = rel_p
+
+            if target_file_path and os.path.exists(target_file_path):
+                try:
+                    meta = MetadataExtractor.extract_full_metadata(target_file_path)
+                    self.register_metadata(h_val, fname, meta)
+                    backfilled_count += 1
+                except Exception as e:
+                    logging.warning(f"Could not backfill metadata for '{target_file_path}': {e}")
+
+        if backfilled_count > 0:
+            self.checkpoint()
+
+        return backfilled_count
+
     def checkpoint(self):
         """Runs a WAL checkpoint to flush WAL logs to disk."""
         with self._get_connection() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+
 
 

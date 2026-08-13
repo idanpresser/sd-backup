@@ -110,3 +110,30 @@ def test_register_and_get_metadata(temp_target_dir):
     assert res["raw_json"] == '{"Image Make": "Sony", "Image Model": "ILCE-7RM4"}'
     db.checkpoint()
 
+
+def test_backfill_missing_metadata(temp_target_dir):
+    db = DatabaseManager(temp_target_dir)
+
+    # 1. Create a dummy file on disk
+    dummy_path = os.path.join(temp_target_dir, "LEGACY_PIC.JPG")
+    with open(dummy_path, "w") as f:
+        f.write("dummy photo content")
+
+    # 2. Register in DB without file_metadata entry (simulating old cataloged file)
+    legacy_hash = "legacy_hash_555"
+    db.register_file(legacy_hash, "LEGACY_PIC.JPG", "LEGACY_PIC.JPG", len("dummy photo content"), "2026-08-01T10:00:00", "MTIME")
+    db.update_transfer_status(legacy_hash, "E:/LEGACY_PIC.JPG", dummy_path, "COPIED")
+    db.checkpoint()
+
+    assert db.get_metadata(legacy_hash) is None
+
+    # 3. Run backfill
+    count = db.backfill_missing_metadata()
+
+    assert count == 1
+    meta = db.get_metadata(legacy_hash)
+    assert meta is not None
+    assert meta["composite_hash"] == legacy_hash
+    assert meta["original_filename"] == "LEGACY_PIC.JPG"
+
+

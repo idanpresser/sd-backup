@@ -311,6 +311,10 @@ class DBCatalogWidget(QWidget):
         btn_sync.setToolTip("Compare database catalog against target files on disk")
         btn_sync.clicked.connect(self._open_sync_dialog)
 
+        self.btn_backfill = QPushButton("📷 Extract Missing EXIF...")
+        self.btn_backfill.setToolTip("Extract EXIF & MediaInfo metadata for cataloged files missing metadata")
+        self.btn_backfill.clicked.connect(self._on_manual_backfill)
+
         btn_refresh = QPushButton("⚡ Refresh")
         btn_refresh.clicked.connect(self.reload_catalog)
 
@@ -318,8 +322,10 @@ class DBCatalogWidget(QWidget):
         top_bar.addWidget(self.search_input, 1)
         top_bar.addWidget(btn_renamer)
         top_bar.addWidget(btn_sync)
+        top_bar.addWidget(self.btn_backfill)
         top_bar.addWidget(btn_refresh)
         main_layout.addLayout(top_bar)
+
 
         # Center Splitter: Table (Left) + Inspector Panel (Right)
         splitter = QSplitter(Qt.Horizontal)
@@ -390,7 +396,14 @@ class DBCatalogWidget(QWidget):
             self.db = DatabaseManager(self.target_dir)
 
         try:
+            # Auto-backfill missing EXIF/MediaInfo metadata for legacy cataloged files
+            self.db.backfill_missing_metadata()
+        except Exception as ex:
+            logging.warning(f"Auto-backfill metadata notice: {ex}")
+
+        try:
             with self.db._get_connection() as conn:
+
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT 
@@ -606,6 +619,23 @@ class DBCatalogWidget(QWidget):
         dialog = DBSyncDialog(self.target_dir, parent=self)
         if dialog.exec() == QDialog.Accepted:
             self.reload_catalog()
+
+    def _on_manual_backfill(self):
+        if not self.target_dir or not os.path.exists(self.target_dir) or not self.db:
+            QMessageBox.warning(self, "Target Required", "Please select a valid target backup directory first.")
+            return
+
+        try:
+            count = self.db.backfill_missing_metadata()
+            self.reload_catalog()
+            QMessageBox.information(
+                self,
+                "Metadata Extraction Complete 🎉",
+                f"Successfully scanned catalog and extracted EXIF/MediaInfo metadata for {count} media files!"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Extraction Error", f"Failed to extract missing metadata: {e}")
+
 
 
 class DBCatalogDialog(QDialog):
