@@ -14,6 +14,22 @@ from utils.media_filter import is_media_file
 # Stack/special folder keywords to preserve in target structure
 STACK_KEYWORDS = {"PANO", "PANORAMA", "BURST", "HDR", "STACK", "TIMELAPSE", "STEREO", "3D", "TRASH", "CLIP"}
 
+# Shooting modes & special tag keywords to preserve in uppercase
+SPECIAL_TAGS = {
+    "PANO", "PANORAMA", "BURST", "HDR", "STACK", "TIMELAPSE", 
+    "HYPERLAPSE", "PORTRAIT", "NIGHT", "SLOWMO", "SLOW_MO", 
+    "STEREO", "3D", "RAW", "EDITED", "COLLAGE", "PRO", "TRASH", "CLIP"
+}
+
+# Drone / Action sub-channel single letter flags (e.g., DJI D-Log, Wide, Zoom, Thermal)
+DRONE_FLAGS = {"D", "T", "W", "Z", "S"}
+
+# Generic camera & device prefixes to strip
+GENERIC_PREFIX_REGEX = re.compile(
+    r'^(?:_MG_|__MG_|IMG_|__IMG_|^IMG|^_IMG|DSC_|__DSC_|_DSC|^DSC|DJI_|DJI|PXL_|VID_|VIDEO_|MVIMG_|GOPR|GX\d{2}|GH\d{2}|SAM_|PHOTO_|PIC_|PICTURE_|IMAGE_|WP_|SCREENSHOT_|SCREEN_)[_\-.]*',
+    re.IGNORECASE
+)
+
 
 def normalize_win_path(path_str: str) -> str:
     """Normalizes slashes to Windows backslashes '\\' on Windows systems."""
@@ -33,18 +49,25 @@ def sanitize_path(path_str: str) -> str:
 
 def extract_sequence_and_clean_stem(original_filename: str) -> Tuple[str, str]:
     """
-    Extracts clip sequence numbers and removes redundant embedded timestamps from filename stem.
-    Example:
-      'DJI_20260811150626_0113_D.MP4' -> ('DJI_0113_D', '0113')
-      'IMG_20260811_150626_0452.JPG'  -> ('IMG_0452', '0452')
-      'DSC00123.JPG'                 -> ('DSC00123', '00123')
+    Extracts clip sequence numbers, strips generic camera/brand prefixes (IMG_, DJI_, DSC, etc.) 
+    and redundant embedded timestamps from filename stem, while preserving custom names and 
+    special shooting tags (PANO, BURST, HDR, D, TIMELAPSE, etc.).
+
+    Examples:
+      'DJI_20260811150626_0113_D.MP4' -> ('0113_D', '0113')
+      'IMG_20260811_150626_0452.JPG'  -> ('0452', '0452')
+      'DSC00123.JPG'                 -> ('00123', '00123')
+      'IMG_0001.JPG'                 -> ('0001', '0001')
+      'PXL_20260811_150626123.PANO.jpg' -> ('PANO', '')
+      'IMG_20260811_150626.JPG'      -> ('', '')
     """
     stem = os.path.splitext(os.path.basename(original_filename))[0]
 
     # 1. Detect and strip embedded timestamp patterns
     timestamp_patterns = [
+        r'(?:19|20)\d{15}',                   # 17-digit timestamp e.g. 20260811150626123
         r'(?:19|20)\d{12}',                   # 14-digit YYYYMMDDHHMMSS e.g. 20260811150626
-        r'(?:19|20)\d{6}[_\-]\d{6}',          # YYYYMMDD_HHMMSS e.g. 20260811_150626
+        r'(?:19|20)\d{6}[_\-.]\d{6}(?:\d{3})?', # YYYYMMDD_HHMMSS or YYYYMMDD_HHMMSS123
         r'(?:19|20)\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}',  # YYYY-MM-DD-HH-MM-SS
         r'(?:19|20)\d{6}'                     # 8-digit date YYYYMMDD
     ]
@@ -53,13 +76,25 @@ def extract_sequence_and_clean_stem(original_filename: str) -> Tuple[str, str]:
     for pattern in timestamp_patterns:
         cleaned_stem = re.sub(pattern, '', cleaned_stem)
 
-    # Clean up residual multiple underscores or hyphens
-    cleaned_stem = re.sub(r'[_\-]{2,}', '_', cleaned_stem).strip('_-')
+    # 2. Strip generic camera/device prefixes
+    cleaned_stem = GENERIC_PREFIX_REGEX.sub('', cleaned_stem)
 
-    if not cleaned_stem:
-        cleaned_stem = stem
+    # Clean up residual multiple underscores, dots, or hyphens
+    cleaned_stem = re.sub(r'[_\-.]{2,}', '_', cleaned_stem).replace('.', '_').strip('_- ')
 
-    # 2. Extract sequence number (e.g. 0113 or 0452 or 00123)
+    # Canonicalize uppercase for special mode tags and drone flags
+    if cleaned_stem:
+        tokens = cleaned_stem.split('_')
+        canon_tokens = []
+        for tok in tokens:
+            tok_upper = tok.upper()
+            if tok_upper in SPECIAL_TAGS or tok_upper in DRONE_FLAGS:
+                canon_tokens.append(tok_upper)
+            else:
+                canon_tokens.append(tok)
+        cleaned_stem = "_".join(canon_tokens)
+
+    # 3. Extract sequence number (e.g. 0113 or 0452 or 00123)
     num_matches = re.findall(r'\d+', cleaned_stem)
     extracted_seq = num_matches[-1] if num_matches else ""
 
@@ -78,8 +113,9 @@ def format_target_relative_dir(dt: datetime) -> str:
 
 def format_target_filename(dt: datetime, original_filename: str, suffix: str = "") -> str:
     """
-    Formats target filename: YYYYMMDD_HHMMSS_<Suffix_Or_CleanStem>.<ext>
-    Strips redundant embedded timestamps from original filename.
+    Formats target filename: YYYYMMDD_HHMMSS[_<CleanStem>][_<Suffix>].<ext>
+    Strips redundant embedded timestamps and generic camera/device prefixes.
+    Places custom suffix always at the end of the filename stem right before the file extension.
     """
     timestamp = dt.strftime("%Y%m%d_%H%M%S")
     _, ext = os.path.splitext(original_filename)
@@ -89,21 +125,17 @@ def format_target_filename(dt: datetime, original_filename: str, suffix: str = "
     cleaned_stem, extracted_seq = extract_sequence_and_clean_stem(original_filename)
     sanitized_suffix = sanitize_path(suffix) if suffix else ""
 
-    if sanitized_suffix:
-        brand_prefixes = [r'^DJI_', r'^IMG_', r'^DSC_', r'^GX\d{2}']
-        stem_no_brand = cleaned_stem
-        for bp in brand_prefixes:
-            stem_no_brand = re.sub(bp, '', stem_no_brand)
-        
-        if stem_no_brand and stem_no_brand != cleaned_stem:
-            middle = f"{sanitized_suffix}_{stem_no_brand}"
-        else:
-            middle = f"{sanitized_suffix}_{cleaned_stem}"
-    else:
-        middle = cleaned_stem
+    parts = [timestamp]
+    if cleaned_stem:
+        parts.append(cleaned_stem)
 
-    middle = re.sub(r'[_\-]{2,}', '_', middle).strip('_-')
-    return f"{timestamp}_{middle}{ext}"
+    if sanitized_suffix:
+        if not (cleaned_stem and (cleaned_stem.endswith(f"_{sanitized_suffix}") or cleaned_stem == sanitized_suffix)):
+            parts.append(sanitized_suffix)
+
+    full_stem = "_".join(parts)
+    full_stem = re.sub(r'[_\-]{2,}', '_', full_stem).strip('_-')
+    return f"{full_stem}{ext}"
 
 
 def extract_stack_subfolder(original_rel_path: str) -> Optional[str]:
