@@ -94,17 +94,17 @@ CREATE TABLE IF NOT EXISTS volumes (
     last_scanned_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Files Catalog: Stores file composite hashes and duplicate tracking states
+-- Files Catalog: Stores file composite hashes, source & target filenames, and duplicate tracking states
 CREATE TABLE IF NOT EXISTS file_catalog (
     file_id INTEGER PRIMARY KEY AUTOINCREMENT,
     composite_hash TEXT UNIQUE NOT NULL, -- SHA256(date_taken + size_bytes)
-    original_filename TEXT NOT NULL,
-    relative_path TEXT NOT NULL,        -- Relative path inside DCIM/Media folder
+    original_filename TEXT NOT NULL,     -- Pristine camera source filename (e.g. IMG_0001.JPG)
+    relative_path TEXT NOT NULL,        -- Source relative path inside DCIM/Media folder
+    destination_filename TEXT,          -- Renamed target filename (e.g. 20260811_150626_Suffix_0001.JPG)
+    target_relative_path TEXT,          -- Destination relative path in backup structure
     file_size_bytes INTEGER NOT NULL,
     date_taken DATETIME NOT NULL,
-    date_taken_source TEXT NOT NULL,     -- 'EXIF', 'CONTAINER', 'MTIME'
-    first_seen_volume_serial TEXT,
-    FOREIGN KEY(first_seen_volume_serial) REFERENCES volumes(volume_serial)
+    date_taken_source TEXT NOT NULL      -- 'EXIF', 'CONTAINER', 'MTIME'
 );
 
 CREATE INDEX IF NOT EXISTS idx_composite_hash ON file_catalog(composite_hash);

@@ -16,8 +16,9 @@ def qapp():
         app = QApplication(["--platform", "offscreen"])
     yield app
 
-def test_main_window_initialization():
-    window = MainWindow()
+def test_main_window_initialization(tmp_path):
+    cfg_file = tmp_path / "init_config.json"
+    window = MainWindow(config_path=str(cfg_file))
     assert window is not None
     assert window.windowTitle() == "SD-FastBackup"
     assert window.drive_selector is not None

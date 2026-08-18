@@ -1,12 +1,12 @@
 {
-  "source_path": "I:\\Backup",
-  "target_directory": "I:\\All_Media_Aug26",
-  "custom_suffix": "AnatKP(C)",
+  "source_path": "C:\\Users\\Presser\\Pictures\\OPPO_ALL",
+  "target_directory": "G:\\All_Media_Aug26",
+  "custom_suffix": "IdanPresser(C)",
   "fastcopy_path": "",
   "subfolder_options": {
     "dcim": true,
     "private": true,
     "full_volume": true,
-    "move_mode": true
+    "move_mode": false
   }
 }

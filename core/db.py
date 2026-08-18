@@ -38,6 +38,8 @@ class DatabaseManager:
                     composite_hash TEXT UNIQUE NOT NULL,
                     original_filename TEXT NOT NULL,
                     relative_path TEXT NOT NULL,
+                    destination_filename TEXT,
+                    target_relative_path TEXT,
                     file_size_bytes INTEGER NOT NULL,
                     date_taken DATETIME NOT NULL,
                     date_taken_source TEXT NOT NULL
@@ -85,6 +87,17 @@ class DatabaseManager:
                     FOREIGN KEY(composite_hash) REFERENCES file_catalog(composite_hash)
                 );
             """)
+            # Schema Migration: Add missing columns to file_catalog if upgrading from legacy DB
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(file_catalog);")
+            columns = [row["name"] for row in cursor.fetchall()]
+            if "destination_filename" not in columns:
+                conn.execute("ALTER TABLE file_catalog ADD COLUMN destination_filename TEXT;")
+            if "target_relative_path" not in columns:
+                conn.execute("ALTER TABLE file_catalog ADD COLUMN target_relative_path TEXT;")
+
+            # Automatically purge legacy DUPLICATE_SKIPPED entries from transfer_manifest
+            conn.execute("DELETE FROM transfer_manifest WHERE copy_status = 'DUPLICATE_SKIPPED';")
 
     def register_volume(self, volume_serial: str, volume_label: str):
         """Registers or updates a scanned SD card volume record."""
@@ -97,14 +110,30 @@ class DatabaseManager:
                     last_scanned_timestamp = CURRENT_TIMESTAMP
             """, (volume_serial, volume_label))
 
-    def register_file(self, composite_hash: str, filename: str, rel_path: str, size: int, date_taken: str, source: str):
-        """Registers a discovered file into the file_catalog table."""
+    def register_file(
+        self, 
+        composite_hash: str, 
+        filename: str, 
+        rel_path: str, 
+        size: int, 
+        date_taken: str, 
+        source: str,
+        destination_filename: Optional[str] = None,
+        target_relative_path: Optional[str] = None
+    ):
+        """Registers a discovered or transferred file into the file_catalog table."""
         with self._get_connection() as conn:
             conn.execute("""
-                INSERT INTO file_catalog (composite_hash, original_filename, relative_path, file_size_bytes, date_taken, date_taken_source)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(composite_hash) DO NOTHING
-            """, (composite_hash, filename, rel_path, size, date_taken, source))
+                INSERT INTO file_catalog (
+                    composite_hash, original_filename, relative_path, 
+                    destination_filename, target_relative_path, 
+                    file_size_bytes, date_taken, date_taken_source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(composite_hash) DO UPDATE SET
+                    destination_filename = COALESCE(excluded.destination_filename, file_catalog.destination_filename),
+                    target_relative_path = COALESCE(excluded.target_relative_path, file_catalog.target_relative_path)
+            """, (composite_hash, filename, rel_path, destination_filename, target_relative_path, size, date_taken, source))
 
     def register_metadata(self, composite_hash: str, filename: str, metadata: Dict[str, Any]):
         """Registers or updates extended image/video metadata in file_metadata table."""
@@ -225,7 +254,7 @@ class DatabaseManager:
         from utils.path_formatter import normalize_win_path
 
         sql = """
-            SELECT fc.composite_hash, fc.original_filename, fc.relative_path, tm.destination_path
+            SELECT fc.composite_hash, fc.original_filename, fc.relative_path, fc.destination_filename, fc.target_relative_path, tm.destination_path
             FROM file_catalog fc
             LEFT JOIN transfer_manifest tm ON fc.composite_hash = tm.composite_hash
         """
@@ -245,6 +274,8 @@ class DatabaseManager:
                     "composite_hash": r["composite_hash"],
                     "original_filename": r["original_filename"],
                     "relative_path": r["relative_path"],
+                    "destination_filename": r["destination_filename"] if "destination_filename" in r.keys() else None,
+                    "target_relative_path": r["target_relative_path"] if "target_relative_path" in r.keys() else None,
                     "destination_path": r["destination_path"]
                 })
 
@@ -266,16 +297,24 @@ class DatabaseManager:
         for item in missing_items:
             h_val = item["composite_hash"]
             fname = item["original_filename"]
-            dest_p = normalize_win_path(item["destination_path"]) if item["destination_path"] else ""
-            rel_p = normalize_win_path(item["relative_path"]) if item["relative_path"] else ""
+            dest_p = normalize_win_path(item["destination_path"]) if item.get("destination_path") else ""
+            target_rel_p = normalize_win_path(item["target_relative_path"]) if item.get("target_relative_path") else ""
+            rel_p = normalize_win_path(item["relative_path"]) if item.get("relative_path") else ""
+            dest_fname = item.get("destination_filename") or ""
 
             target_file_path = ""
             if dest_p and os.path.exists(dest_p):
                 target_file_path = dest_p
+            elif target_rel_p and os.path.exists(normalize_win_path(os.path.join(self.target_dir, target_rel_p))):
+                target_file_path = normalize_win_path(os.path.join(self.target_dir, target_rel_p))
             elif rel_p and os.path.exists(normalize_win_path(os.path.join(self.target_dir, rel_p))):
                 target_file_path = normalize_win_path(os.path.join(self.target_dir, rel_p))
+            elif target_rel_p and target_rel_p.lower() in disk_file_index:
+                target_file_path = disk_file_index[target_rel_p.lower()]
             elif rel_p.lower() in disk_file_index:
                 target_file_path = disk_file_index[rel_p.lower()]
+            elif dest_fname and dest_fname.lower() in disk_file_index:
+                target_file_path = disk_file_index[dest_fname.lower()]
             elif fname and fname.lower() in disk_file_index:
                 target_file_path = disk_file_index[fname.lower()]
 

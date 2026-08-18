@@ -111,6 +111,81 @@ def test_register_and_get_metadata(temp_target_dir):
     db.checkpoint()
 
 
+def test_original_and_destination_filenames(temp_target_dir):
+    db = DatabaseManager(temp_target_dir)
+    hash_val = "hash_with_dest_123"
+    db.register_file(
+        composite_hash=hash_val,
+        filename="DJI_0113.MP4",
+        rel_path="DCIM/100MEDIA/DJI_0113.MP4",
+        size=12345678,
+        date_taken="2026-08-11T15:06:26",
+        source="EXIF",
+        destination_filename="20260811_150626_IdanPresser(C)_0113.MP4",
+        target_relative_path="2026/2026-08/2026-08-11/20260811_150626_IdanPresser(C)_0113.MP4"
+    )
+    db.checkpoint()
+
+    with db._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM file_catalog WHERE composite_hash = ?", (hash_val,))
+        row = dict(cursor.fetchone())
+        assert row["original_filename"] == "DJI_0113.MP4"
+        assert row["destination_filename"] == "20260811_150626_IdanPresser(C)_0113.MP4"
+        assert row["target_relative_path"] == "2026/2026-08/2026-08-11/20260811_150626_IdanPresser(C)_0113.MP4"
+
+
+def test_migration_purges_duplicate_skipped(temp_target_dir):
+    import sqlite3
+    db_path = os.path.join(temp_target_dir, ".sd_backup_catalog.db")
+    
+    # Manually create legacy DB with DUPLICATE_SKIPPED row
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE file_catalog (
+            file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            composite_hash TEXT UNIQUE NOT NULL,
+            original_filename TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            file_size_bytes INTEGER NOT NULL,
+            date_taken DATETIME NOT NULL,
+            date_taken_source TEXT NOT NULL
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE transfer_manifest (
+            transfer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            composite_hash TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            destination_path TEXT NOT NULL,
+            copy_status TEXT,
+            transferred_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.execute("INSERT INTO file_catalog VALUES (1, 'hash_dup', 'PIC.JPG', 'DCIM/PIC.JPG', 100, '2026-01-01', 'MTIME')")
+    conn.execute("INSERT INTO transfer_manifest VALUES (1, 'hash_dup', 'E:/PIC.JPG', 'D:/PIC.JPG', 'COPIED', CURRENT_TIMESTAMP)")
+    conn.execute("INSERT INTO transfer_manifest VALUES (2, 'hash_dup', 'E:/PIC.JPG', 'D:/PIC.JPG', 'DUPLICATE_SKIPPED', CURRENT_TIMESTAMP)")
+    conn.commit()
+    conn.close()
+
+    # Now initialize DatabaseManager which triggers migration
+    db = DatabaseManager(temp_target_dir)
+    db.checkpoint()
+
+    with db._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT copy_status FROM transfer_manifest")
+        statuses = [r["copy_status"] for r in cursor.fetchall()]
+        assert "DUPLICATE_SKIPPED" not in statuses
+        assert "COPIED" in statuses
+        
+        # Verify columns were added to file_catalog
+        cursor.execute("PRAGMA table_info(file_catalog)")
+        cols = [r["name"] for r in cursor.fetchall()]
+        assert "destination_filename" in cols
+        assert "target_relative_path" in cols
+
+
 def test_backfill_missing_metadata(temp_target_dir):
     db = DatabaseManager(temp_target_dir)
 
@@ -135,5 +210,7 @@ def test_backfill_missing_metadata(temp_target_dir):
     assert meta is not None
     assert meta["composite_hash"] == legacy_hash
     assert meta["original_filename"] == "LEGACY_PIC.JPG"
+
+
 
 

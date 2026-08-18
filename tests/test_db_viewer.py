@@ -77,7 +77,7 @@ def test_db_sync_dialog_preview(qapp, sample_db_env):
 
 def test_main_window_tab_widget(qapp, sample_db_env):
     root_dir, db = sample_db_env
-    window = MainWindow()
+    window = MainWindow(config_path=os.path.join(root_dir, "test_config.json"))
     assert hasattr(window, "tab_widget")
     assert window.tab_widget.count() == 2
     assert window.tab_widget.tabText(0) == "⚡ Backup Launcher"

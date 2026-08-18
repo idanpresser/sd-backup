@@ -138,15 +138,11 @@ class BackupWorker(QThread):
             comp_hash = MetadataExtractor.compute_hash_from_values(dt_taken, fsize)
             dt_iso = dt_taken.isoformat()
 
-            db.register_file(comp_hash, fname, rel_path, fsize, dt_iso, "MTP_PHONE")
-            try:
-                mtp_meta = {
-                    "camera_make": dev_name,
-                    "raw_json": json.dumps({"source": "MTP_PHONE", "name": fname, "size": fsize, "date_taken": dt_iso})
-                }
-                db.register_metadata(comp_hash, fname, mtp_meta)
-            except Exception:
-                pass
+            if db.is_file_copied(comp_hash):
+                duplicate_count += 1
+                self.signals.duplicate_found.emit(fname, comp_hash, float(fsize))
+                # Ignore duplicates: zero DB writes
+                continue
 
             base_target_dest = format_full_target_path(
                 self.target_dir,
@@ -156,21 +152,15 @@ class BackupWorker(QThread):
                 original_rel_path=rel_path
             )
             target_dest = resolve_target_path_collision(base_target_dest)
-
-            if db.is_file_copied(comp_hash):
-                duplicate_count += 1
-                self.signals.duplicate_found.emit(fname, comp_hash, float(fsize))
-                db.update_transfer_status(comp_hash, f"{dev_name}\\{rel_path}", target_dest, 'DUPLICATE_SKIPPED')
-            else:
-                files_to_copy.append((shell_item, target_dest, comp_hash, fsize, fname))
-                total_copy_bytes += fsize
+            files_to_copy.append((shell_item, target_dest, comp_hash, fsize, fname, rel_path, dt_iso))
+            total_copy_bytes += fsize
 
         copied_count = 0
         if files_to_copy and not self._is_cancelled:
             total_copy_files = len(files_to_copy)
             self.signals.transfer_started.emit(total_copy_files, float(total_copy_bytes))
 
-            for idx, (shell_item, dst_p, h_val, f_size, orig_fname) in enumerate(files_to_copy, start=1):
+            for idx, (shell_item, dst_p, h_val, f_size, orig_fname, orig_rel_p, dt_iso) in enumerate(files_to_copy, start=1):
                 if self._is_cancelled:
                     db.checkpoint()
                     return
@@ -180,6 +170,19 @@ class BackupWorker(QThread):
 
                 if success:
                     copied_count += 1
+                    dest_filename = os.path.basename(resolved_dst)
+                    target_rel_p = normalize_win_path(os.path.relpath(resolved_dst, self.target_dir))
+
+                    db.register_file(
+                        h_val, 
+                        orig_fname, 
+                        orig_rel_p, 
+                        f_size, 
+                        dt_iso, 
+                        "MTP_PHONE",
+                        destination_filename=dest_filename,
+                        target_relative_path=target_rel_p
+                    )
                     db.update_transfer_status(h_val, f"{dev_name}\\{orig_fname}", resolved_dst, 'COPIED')
                     try:
                         extracted_meta = MetadataExtractor.extract_full_metadata(resolved_dst)
@@ -187,8 +190,8 @@ class BackupWorker(QThread):
                         db.register_metadata(h_val, orig_fname, extracted_meta)
                     except Exception:
                         pass
-                    self.signals.transfer_line.emit(f"📱 MTP Transferred: {os.path.basename(resolved_dst)}")
-                    self.signals.transfer_progress.emit(copied_count, total_copy_files, os.path.basename(resolved_dst), 100)
+                    self.signals.transfer_line.emit(f"📱 MTP Transferred: {dest_filename}")
+                    self.signals.transfer_progress.emit(copied_count, total_copy_files, dest_filename, 100)
                 else:
                     read_error_count += 1
                     self.signals.read_error.emit(orig_fname, "MTP stream transfer failed")
@@ -259,12 +262,11 @@ class BackupWorker(QThread):
             rel_path = normalize_win_path(os.path.relpath(norm_file_path, self.source_path))
             dt_iso = date_taken.isoformat()
 
-            db.register_file(composite_hash, file_basename, rel_path, size, dt_iso, source_type)
-            try:
-                full_meta = MetadataExtractor.extract_full_metadata(norm_file_path)
-                db.register_metadata(composite_hash, file_basename, full_meta)
-            except Exception as meta_ex:
-                logging.warning(f"Could not extract full metadata for '{file_basename}': {meta_ex}")
+            if db.is_file_copied(composite_hash):
+                duplicate_count += 1
+                self.signals.duplicate_found.emit(file_basename, composite_hash, float(size))
+                # Ignore duplicates: zero DB writes
+                continue
 
             base_target_dest = format_full_target_path(
                 self.target_dir, 
@@ -274,14 +276,8 @@ class BackupWorker(QThread):
                 original_rel_path=rel_path
             )
             target_destination = resolve_target_path_collision(base_target_dest)
-
-            if db.is_file_copied(composite_hash):
-                duplicate_count += 1
-                self.signals.duplicate_found.emit(file_basename, composite_hash, float(size))
-                db.update_transfer_status(composite_hash, norm_file_path, target_destination, 'DUPLICATE_SKIPPED')
-            else:
-                files_to_copy.append((norm_file_path, target_destination, composite_hash, size, rel_path))
-                total_copy_bytes += size
+            files_to_copy.append((norm_file_path, target_destination, composite_hash, size, rel_path, file_basename, dt_iso, source_type))
+            total_copy_bytes += size
 
         copied_count = 0
         if files_to_copy and not self._is_cancelled:
@@ -290,7 +286,7 @@ class BackupWorker(QThread):
             
             if self.move_mode:
                 self.signals.transfer_line.emit("🚚 Instant Same-Drive Move Mode active...")
-                for idx, (src_p, final_dst_p, h_val, f_size, rel_p) in enumerate(files_to_copy, start=1):
+                for idx, (src_p, final_dst_p, h_val, f_size, rel_p, orig_basename, dt_iso, src_type) in enumerate(files_to_copy, start=1):
                     if self._is_cancelled:
                         db.checkpoint()
                         return
@@ -301,11 +297,29 @@ class BackupWorker(QThread):
                     if os.path.exists(src_p):
                         shutil.move(src_p, resolved_dst_p)
 
+                    dest_filename = os.path.basename(resolved_dst_p)
+                    target_rel_path = normalize_win_path(os.path.relpath(resolved_dst_p, self.target_dir))
+
+                    db.register_file(
+                        h_val, 
+                        orig_basename, 
+                        rel_p, 
+                        f_size, 
+                        dt_iso, 
+                        src_type,
+                        destination_filename=dest_filename,
+                        target_relative_path=target_rel_path
+                    )
                     db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
+                    try:
+                        full_meta = MetadataExtractor.extract_full_metadata(resolved_dst_p)
+                        db.register_metadata(h_val, orig_basename, full_meta)
+                    except Exception as meta_ex:
+                        logging.warning(f"Could not extract full metadata for '{orig_basename}': {meta_ex}")
+
                     copied_count += 1
-                    fname = os.path.basename(resolved_dst_p)
-                    self.signals.transfer_line.emit(f"⚡ Moved: {fname}")
-                    self.signals.transfer_progress.emit(copied_count, total_copy_files, fname, 100)
+                    self.signals.transfer_line.emit(f"⚡ Moved: {dest_filename}")
+                    self.signals.transfer_progress.emit(copied_count, total_copy_files, dest_filename, 100)
 
             else:
                 source_paths = [item[0] for item in files_to_copy]
@@ -322,7 +336,7 @@ class BackupWorker(QThread):
                     if metrics:
                         self.signals.transfer_metrics.emit(metrics)
 
-                for idx, (src_p, final_dst_p, h_val, f_size, rel_p) in enumerate(files_to_copy, start=1):
+                for idx, (src_p, final_dst_p, h_val, f_size, rel_p, orig_basename, dt_iso, src_type) in enumerate(files_to_copy, start=1):
                     if self._is_cancelled:
                         self._cleanup_staging(staging_dir)
                         db.checkpoint()
@@ -339,9 +353,28 @@ class BackupWorker(QThread):
                     elif os.path.exists(src_p):
                         shutil.copy2(src_p, resolved_dst_p)
 
+                    dest_filename = os.path.basename(resolved_dst_p)
+                    target_rel_path = normalize_win_path(os.path.relpath(resolved_dst_p, self.target_dir))
+
+                    db.register_file(
+                        h_val, 
+                        orig_basename, 
+                        rel_p, 
+                        f_size, 
+                        dt_iso, 
+                        src_type,
+                        destination_filename=dest_filename,
+                        target_relative_path=target_rel_path
+                    )
                     db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
+                    try:
+                        full_meta = MetadataExtractor.extract_full_metadata(resolved_dst_p)
+                        db.register_metadata(h_val, orig_basename, full_meta)
+                    except Exception as meta_ex:
+                        logging.warning(f"Could not extract full metadata for '{orig_basename}': {meta_ex}")
+
                     copied_count += 1
-                    self.signals.transfer_progress.emit(copied_count, total_copy_files, os.path.basename(resolved_dst_p), 100)
+                    self.signals.transfer_progress.emit(copied_count, total_copy_files, dest_filename, 100)
 
         self._cleanup_staging(staging_dir)
 

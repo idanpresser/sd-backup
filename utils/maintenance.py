@@ -154,6 +154,13 @@ def rename_suffix_in_backup(
                     )
                     if cursor.rowcount > 0:
                         db_updated_count += cursor.rowcount
+
+                # Update destination_filename and target_relative_path in file_catalog while keeping original_filename intact
+                new_rel_p = normalize_win_path(os.path.relpath(new_path, norm_root))
+                cursor.execute(
+                    "UPDATE file_catalog SET destination_filename = ?, target_relative_path = ? WHERE destination_filename = ? OR target_relative_path LIKE ?",
+                    (new_base_name, new_rel_p, base_name, f"%{base_name}")
+                )
             except Exception as e:
                 logging.error(f"Error updating SQLite catalog for '{norm_old_path}': {e}")
                 errors += 1

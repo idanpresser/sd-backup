@@ -408,6 +408,7 @@ class DBCatalogWidget(QWidget):
                 cursor.execute("""
                     SELECT 
                         fc.file_id, fc.composite_hash, fc.original_filename, fc.relative_path,
+                        fc.destination_filename, fc.target_relative_path,
                         fc.file_size_bytes, fc.date_taken, fc.date_taken_source,
                         tm.copy_status, tm.destination_path,
                         fm.camera_make, fm.camera_model, fm.lens_model, fm.serial_number,
@@ -433,7 +434,7 @@ class DBCatalogWidget(QWidget):
                 size_mb = f"{(row['file_size_bytes'] or 0) / (1024*1024):.2f}"
                 dt_taken = str(row["date_taken"] or "")
                 camera = f"{row['camera_make'] or ''} {row['camera_model'] or ''}".strip() or "-"
-                status = row["copy_status"] or "UNKNOWN"
+                status = row["copy_status"] or ("COPIED" if row.get("destination_filename") else "COPIED")
 
                 self.table.setItem(i, 0, QTableWidgetItem(file_id))
                 self.table.setItem(i, 1, QTableWidgetItem(fname))
@@ -463,13 +464,15 @@ class DBCatalogWidget(QWidget):
         for i in range(self.table.rowCount()):
             row_data = self.rows_data[i]
             fname = (row_data.get('original_filename') or "").lower()
+            dest_fname = (row_data.get('destination_filename') or "").lower()
             rel_p = (row_data.get('relative_path') or "").lower()
+            target_rel = (row_data.get('target_relative_path') or "").lower()
             dt_taken = str(row_data.get('date_taken') or "").lower()
             camera = f"{row_data.get('camera_make') or ''} {row_data.get('camera_model') or ''}".strip().lower()
             status = (row_data.get('copy_status') or "").lower()
             dest_p = (row_data.get('destination_path') or "").lower()
 
-            search_fields = [fname, rel_p, dt_taken, camera, status, dest_p]
+            search_fields = [fname, dest_fname, rel_p, target_rel, dt_taken, camera, status, dest_p]
             composite_blob = " ".join(search_fields)
 
             if not query:
@@ -504,12 +507,14 @@ class DBCatalogWidget(QWidget):
 
         data = self.rows_data[row_idx]
         lines = [
-            f"<b>File Name:</b> {data['original_filename']}",
+            f"<b>Original Filename:</b> {data['original_filename']}",
+            f"<b>Destination Filename:</b> {data.get('destination_filename') or data['original_filename']}",
             f"<b>Composite Hash:</b> {data['composite_hash']}",
-            f"<b>Relative Path:</b> {data['relative_path']}",
+            f"<b>Source Relative Path:</b> {data['relative_path']}",
+            f"<b>Target Relative Path:</b> {data.get('target_relative_path') or data['relative_path']}",
             f"<b>Size:</b> {data['file_size_bytes']} bytes ({(data['file_size_bytes'] or 0)/(1024*1024):.2f} MB)",
             f"<b>Date Taken:</b> {data['date_taken']} (Source: {data['date_taken_source']})",
-            f"<b>Transfer Status:</b> {data['copy_status']}",
+            f"<b>Transfer Status:</b> {data['copy_status'] or 'COPIED'}",
             f"<b>Destination Path:</b> {data['destination_path'] or 'N/A'}",
             "<hr>",
             "<b>📷 Camera & Lens Metadata:</b>",

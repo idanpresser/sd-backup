@@ -35,13 +35,18 @@ def calculate_sync_diff(root_dir: str) -> Dict[str, Any]:
     with db._get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT fc.composite_hash, fc.original_filename, fc.relative_path, tm.destination_path 
+            SELECT fc.composite_hash, fc.original_filename, fc.relative_path, fc.destination_filename, fc.target_relative_path, tm.destination_path 
             FROM file_catalog fc
             LEFT JOIN transfer_manifest tm ON fc.composite_hash = tm.composite_hash
         """)
         rows = cursor.fetchall()
         for r in rows:
             dest_p = normalize_win_path(r["destination_path"]) if r["destination_path"] else ""
+            if not dest_p and ("target_relative_path" in r.keys() and r["target_relative_path"]):
+                dest_p = normalize_win_path(os.path.join(norm_root, r["target_relative_path"]))
+            elif not dest_p and r["relative_path"]:
+                dest_p = normalize_win_path(os.path.join(norm_root, r["relative_path"]))
+
             if dest_p:
                 known_disk_paths.add(dest_p)
                 if not os.path.exists(dest_p):
@@ -155,7 +160,16 @@ def execute_sync(
                 src = item["source_type"]
 
                 try:
-                    db.register_file(comp_hash, fname, rel_p, size, dt_iso, src)
+                    db.register_file(
+                        comp_hash, 
+                        fname, 
+                        rel_p, 
+                        size, 
+                        dt_iso, 
+                        src,
+                        destination_filename=fname,
+                        target_relative_path=rel_p
+                    )
                     db.update_transfer_status(comp_hash, full_p, full_p, "COPIED")
                     meta = MetadataExtractor.extract_full_metadata(full_p)
                     db.register_metadata(comp_hash, fname, meta)
