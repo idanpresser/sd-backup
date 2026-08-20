@@ -16,6 +16,7 @@ from core.metadata import MetadataExtractor
 from core.db import DatabaseManager
 from core.fastcopy import FastCopyRunner, parse_fastcopy_stdout_line
 from core.mtp_engine import MTPEngine, is_mtp_path, parse_mtp_device_name, parse_mtp_subfolder_path, _ensure_coinitialize
+from core.sync_engine import execute_sync
 from utils.path_formatter import (
     filter_source_files, 
     format_full_target_path, 
@@ -49,7 +50,9 @@ class BackupWorker(QThread):
         fastcopy_path: str = "", 
         custom_suffix: str = "", 
         folder_opts: Optional[Dict[str, bool]] = None,
-        move_mode: bool = False
+        move_mode: bool = False,
+        auto_rescan: bool = False,
+        rescan_full_drive: bool = False
     ):
         super().__init__()
         self.raw_source_path = source_card_path
@@ -65,11 +68,17 @@ class BackupWorker(QThread):
         self.custom_suffix = custom_suffix
         self.folder_opts = folder_opts or {"dcim": True, "private": True, "full_volume": False}
         self.move_mode = move_mode
+        self.auto_rescan = auto_rescan
+        self.rescan_full_drive = rescan_full_drive
         self.signals = WorkerSignals()
         self._is_cancelled = False
+        # Root-relative destination date-folders written this session; used to scope the
+        # optional post-import reconcile so it never re-walks the whole archive.
+        self._touched_dirs = set()
 
     def run(self):
         _ensure_coinitialize()
+        db = None
         try:
             db = DatabaseManager(self.target_dir)
 
@@ -78,9 +87,25 @@ class BackupWorker(QThread):
             else:
                 self._run_standard_pipeline(db)
 
+            if self.auto_rescan and not self._is_cancelled:
+                self._run_post_import_reconcile()
+
         except Exception as e:
             logging.exception("Fatal error in BackupWorker pipeline.")
             self.signals.error.emit(str(e))
+        finally:
+            # Bump the generation marker (consumer change signal) then leave the catalog
+            # quiescent — WAL flushed, sidecars dropped — so the culler's immutable=1 attach
+            # sees every committed row plus the new generation, and never reads a torn page.
+            if db is not None:
+                try:
+                    db.bump_generation()
+                except Exception:
+                    logging.warning("Could not bump catalog generation.", exc_info=True)
+                try:
+                    db.finalize()
+                except Exception:
+                    logging.warning("Could not finalize catalog after session.", exc_info=True)
 
     def _run_mtp_pipeline(self, db: DatabaseManager):
         """Engine B: MTP Mobile Phone Transfer Pipeline (Android & iPhone)."""
@@ -172,6 +197,10 @@ class BackupWorker(QThread):
                     copied_count += 1
                     dest_filename = os.path.basename(resolved_dst)
                     target_rel_p = normalize_win_path(os.path.relpath(resolved_dst, self.target_dir))
+
+                    touched = os.path.dirname(target_rel_p)
+                    if touched:
+                        self._touched_dirs.add(touched)
 
                     db.register_file(
                         h_val, 
@@ -297,29 +326,15 @@ class BackupWorker(QThread):
                     if os.path.exists(src_p):
                         shutil.move(src_p, resolved_dst_p)
 
-                    dest_filename = os.path.basename(resolved_dst_p)
-                    target_rel_path = normalize_win_path(os.path.relpath(resolved_dst_p, self.target_dir))
-
-                    db.register_file(
-                        h_val, 
-                        orig_basename, 
-                        rel_p, 
-                        f_size, 
-                        dt_iso, 
-                        src_type,
-                        destination_filename=dest_filename,
-                        target_relative_path=target_rel_path
-                    )
-                    db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
-                    try:
-                        full_meta = MetadataExtractor.extract_full_metadata(resolved_dst_p)
-                        db.register_metadata(h_val, orig_basename, full_meta)
-                    except Exception as meta_ex:
-                        logging.warning(f"Could not extract full metadata for '{orig_basename}': {meta_ex}")
-
-                    copied_count += 1
-                    self.signals.transfer_line.emit(f"⚡ Moved: {dest_filename}")
-                    self.signals.transfer_progress.emit(copied_count, total_copy_files, dest_filename, 100)
+                    if self._finalize_transfer(
+                        db, resolved_dst_p, h_val, orig_basename, rel_p, f_size, dt_iso, src_type, src_p
+                    ):
+                        copied_count += 1
+                        dest_filename = os.path.basename(resolved_dst_p)
+                        self.signals.transfer_line.emit(f"⚡ Moved: {dest_filename}")
+                        self.signals.transfer_progress.emit(copied_count, total_copy_files, dest_filename, 100)
+                    else:
+                        read_error_count += 1
 
             else:
                 source_paths = [item[0] for item in files_to_copy]
@@ -353,28 +368,14 @@ class BackupWorker(QThread):
                     elif os.path.exists(src_p):
                         shutil.copy2(src_p, resolved_dst_p)
 
-                    dest_filename = os.path.basename(resolved_dst_p)
-                    target_rel_path = normalize_win_path(os.path.relpath(resolved_dst_p, self.target_dir))
-
-                    db.register_file(
-                        h_val, 
-                        orig_basename, 
-                        rel_p, 
-                        f_size, 
-                        dt_iso, 
-                        src_type,
-                        destination_filename=dest_filename,
-                        target_relative_path=target_rel_path
-                    )
-                    db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
-                    try:
-                        full_meta = MetadataExtractor.extract_full_metadata(resolved_dst_p)
-                        db.register_metadata(h_val, orig_basename, full_meta)
-                    except Exception as meta_ex:
-                        logging.warning(f"Could not extract full metadata for '{orig_basename}': {meta_ex}")
-
-                    copied_count += 1
-                    self.signals.transfer_progress.emit(copied_count, total_copy_files, dest_filename, 100)
+                    if self._finalize_transfer(
+                        db, resolved_dst_p, h_val, orig_basename, rel_p, f_size, dt_iso, src_type, src_p
+                    ):
+                        copied_count += 1
+                        dest_filename = os.path.basename(resolved_dst_p)
+                        self.signals.transfer_progress.emit(copied_count, total_copy_files, dest_filename, 100)
+                    else:
+                        read_error_count += 1
 
         self._cleanup_staging(staging_dir)
 
@@ -387,6 +388,95 @@ class BackupWorker(QThread):
         }
         db.checkpoint()
         self.signals.finished.emit(summary)
+
+    def _finalize_transfer(
+        self,
+        db: DatabaseManager,
+        resolved_dst_p: str,
+        h_val: str,
+        orig_basename: str,
+        rel_p: str,
+        f_size: int,
+        dt_iso: str,
+        src_type: str,
+        src_p: str,
+    ) -> bool:
+        """Record the outcome of a single file transfer.
+
+        Returns True only if the destination file actually exists on disk, in which
+        case it is cataloged as COPIED (with metadata). If the destination is missing
+        — card pulled mid-copy, staging failure, or I/O error — nothing is cataloged;
+        the transfer is recorded as FAILED and a read_error is surfaced. This prevents
+        a phantom COPIED row pointing at a file that was never written.
+        """
+        if not os.path.exists(resolved_dst_p):
+            # Nothing was written to disk. Do NOT catalog the file: a file_catalog row
+            # would be a phantom COPIED entry pointing at a non-existent file (which the
+            # downstream culler would try to serve). We also cannot record a bare FAILED
+            # transfer_manifest row — its composite_hash FK references file_catalog, which
+            # has no row here — so the failure is surfaced via signal + error count only.
+            logging.error(
+                f"Transfer target missing after copy: '{resolved_dst_p}' (source '{src_p}')"
+            )
+            self.signals.read_error.emit(
+                orig_basename, "Transfer failed: destination file missing after copy"
+            )
+            return False
+
+        dest_filename = os.path.basename(resolved_dst_p)
+        target_rel_path = normalize_win_path(os.path.relpath(resolved_dst_p, self.target_dir))
+
+        touched = os.path.dirname(target_rel_path)
+        if touched:
+            self._touched_dirs.add(touched)
+
+        db.register_file(
+            h_val,
+            orig_basename,
+            rel_p,
+            f_size,
+            dt_iso,
+            src_type,
+            destination_filename=dest_filename,
+            target_relative_path=target_rel_path,
+        )
+        db.update_transfer_status(h_val, src_p, resolved_dst_p, 'COPIED')
+        try:
+            full_meta = MetadataExtractor.extract_full_metadata(resolved_dst_p)
+            db.register_metadata(h_val, orig_basename, full_meta)
+        except Exception as meta_ex:
+            logging.warning(f"Could not extract full metadata for '{orig_basename}': {meta_ex}")
+        return True
+
+    def _run_post_import_reconcile(self):
+        """Reconcile the destination against the catalog after an import.
+
+        Indexes files that appeared on disk without a catalog record (e.g. manually
+        dropped from another card) and backfills metadata. Scoped by default to the
+        date-folders this session touched so a multi-TB archive is not re-walked every
+        import; a full-drive pass is opt-in via rescan_full_drive. Missing records are
+        NOT purged here — a file could be mid-write right after a backup.
+        """
+        scope = None if self.rescan_full_drive else sorted(self._touched_dirs)
+        if not self.rescan_full_drive and not scope:
+            return  # nothing was written; nothing to reconcile
+
+        label = "full destination" if self.rescan_full_drive else f"{len(scope)} touched folder(s)"
+        self.signals.transfer_line.emit(f"🔄 Reconciling {label} (rescan after import)...")
+        try:
+            summary = execute_sync(
+                self.target_dir,
+                remove_missing=False,
+                add_uncataloged=True,
+                uncataloged_action="ADD_TO_DB",
+                scope_subdirs=scope,
+            )
+            self.signals.transfer_line.emit(
+                f"🔄 Rescan complete: +{summary.get('added_records', 0)} indexed, "
+                f"{summary.get('errors', 0)} errors"
+            )
+        except Exception:
+            logging.warning("Post-import reconcile failed.", exc_info=True)
 
     def _cleanup_staging(self, staging_dir: str):
         """Removes temporary staging directory after batch transfer."""

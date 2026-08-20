@@ -8,14 +8,34 @@ import sqlite3
 import logging
 from typing import Dict, Any, List
 from utils.path_formatter import normalize_win_path
-from utils.media_filter import is_blacklisted_system_file
+from utils.media_filter import is_blacklisted_system_file, is_media_file
 from core.metadata import MetadataExtractor
 from core.db import DatabaseManager
 
 
-def calculate_sync_diff(root_dir: str) -> Dict[str, Any]:
+def _scope_walk_roots(norm_root: str, scope_subdirs) -> List[str]:
+    """Resolve the set of directories to walk. Unscoped -> the whole root; scoped ->
+    only the given (existing) subdirs, each validated to stay inside the root."""
+    if not scope_subdirs:
+        return [norm_root]
+    roots = []
+    for sub in scope_subdirs:
+        cand = normalize_win_path(os.path.join(norm_root, sub))
+        if os.path.commonpath([cand, norm_root]) == norm_root and os.path.isdir(cand):
+            roots.append(cand)
+    return roots
+
+
+def calculate_sync_diff(root_dir: str, scope_subdirs: List[str] = None) -> Dict[str, Any]:
     """
     Scans backup root directory and compares against SQLite catalog.
+
+    Args:
+        root_dir: archive root to reconcile.
+        scope_subdirs: optional list of root-relative subdirectories (e.g. the date
+            folders touched by the last backup batch). When provided, only those subtrees
+            are walked for uncataloged files and only records under them are considered
+            for the missing check — this avoids re-walking a multi-TB archive per import.
 
     Returns dict with:
         'missing_records': List of catalog records whose file is no longer present on disk
@@ -24,6 +44,14 @@ def calculate_sync_diff(root_dir: str) -> Dict[str, Any]:
     norm_root = normalize_win_path(os.path.abspath(root_dir))
     if not os.path.exists(norm_root):
         raise FileNotFoundError(f"Backup root directory does not exist: {norm_root}")
+
+    walk_roots = _scope_walk_roots(norm_root, scope_subdirs)
+
+    def _in_scope(disk_path: str) -> bool:
+        if not scope_subdirs:
+            return True
+        p = normalize_win_path(disk_path)
+        return any(os.path.commonpath([p, wr]) == wr for wr in walk_roots)
 
     db = DatabaseManager(norm_root)
 
@@ -49,7 +77,7 @@ def calculate_sync_diff(root_dir: str) -> Dict[str, Any]:
 
             if dest_p:
                 known_disk_paths.add(dest_p)
-                if not os.path.exists(dest_p):
+                if not os.path.exists(dest_p) and _in_scope(dest_p):
                     missing_records.append({
                         "composite_hash": r["composite_hash"],
                         "original_filename": r["original_filename"],
@@ -65,29 +93,31 @@ def calculate_sync_diff(root_dir: str) -> Dict[str, Any]:
         for r in cursor.fetchall():
             cataloged_hashes.add(r["composite_hash"])
 
-    for root, _, files in os.walk(norm_root):
-        for fname in files:
-            if fname.startswith('.') or fname.endswith('.db') or fname.endswith('.db-wal') or fname.endswith('.db-shm'):
-                continue
-            full_p = normalize_win_path(os.path.join(root, fname))
-            if is_blacklisted_system_file(full_p):
-                continue
+    # Walk only the in-scope roots (whole archive when unscoped, else the touched subdirs).
+    for wr in walk_roots:
+        for root, _, files in os.walk(wr):
+            for fname in files:
+                if fname.startswith('.') or fname.endswith('.db') or fname.endswith('.db-wal') or fname.endswith('.db-shm'):
+                    continue
+                full_p = normalize_win_path(os.path.join(root, fname))
+                if not is_media_file(full_p):
+                    continue
 
-            # Compute hash to check if already in catalog
-            try:
-                comp_hash, size, dt_taken, source_type = MetadataExtractor.compute_composite_hash(full_p)
-                if comp_hash not in cataloged_hashes and full_p not in known_disk_paths:
-                    rel_p = normalize_win_path(os.path.relpath(full_p, norm_root))
-                    uncataloged_files.append({
-                        "file_path": full_p,
-                        "relative_path": rel_p,
-                        "composite_hash": comp_hash,
-                        "file_size": size,
-                        "date_taken": dt_taken,
-                        "source_type": source_type
-                    })
-            except Exception as e:
-                logging.warning(f"Could not calculate hash for file '{full_p}': {e}")
+                # Compute hash to check if already in catalog
+                try:
+                    comp_hash, size, dt_taken, source_type = MetadataExtractor.compute_composite_hash(full_p)
+                    if comp_hash not in cataloged_hashes and full_p not in known_disk_paths:
+                        rel_p = normalize_win_path(os.path.relpath(full_p, norm_root))
+                        uncataloged_files.append({
+                            "file_path": full_p,
+                            "relative_path": rel_p,
+                            "composite_hash": comp_hash,
+                            "file_size": size,
+                            "date_taken": dt_taken,
+                            "source_type": source_type
+                        })
+                except Exception as e:
+                    logging.warning(f"Could not calculate hash for file '{full_p}': {e}")
 
     return {
         "missing_records": missing_records,
@@ -99,7 +129,8 @@ def execute_sync(
     root_dir: str,
     remove_missing: bool = True,
     add_uncataloged: bool = True,
-    uncataloged_action: str = "ADD_TO_DB"
+    uncataloged_action: str = "ADD_TO_DB",
+    scope_subdirs: List[str] = None
 ) -> Dict[str, int]:
     """
     Executes synchronization actions between disk storage and SQLite catalog based on options.
@@ -109,6 +140,7 @@ def execute_sync(
         remove_missing: If True, purges catalog records for missing disk files
         add_uncataloged: Backwards compatibility boolean (if True and uncataloged_action default, adds to DB)
         uncataloged_action: Action for untracked disk files ("ADD_TO_DB", "DELETE_FROM_DISK", "IGNORE")
+        scope_subdirs: optional root-relative subdirs to limit the walk to (see calculate_sync_diff)
 
     Returns dict with summary counts:
         'removed_records': int
@@ -117,7 +149,7 @@ def execute_sync(
         'errors': int
     """
     norm_root = normalize_win_path(os.path.abspath(root_dir))
-    diff = calculate_sync_diff(norm_root)
+    diff = calculate_sync_diff(norm_root, scope_subdirs=scope_subdirs)
     db = DatabaseManager(norm_root)
 
     removed_count = 0
@@ -189,7 +221,10 @@ def execute_sync(
                         logging.error(f"Error deleting uncataloged file '{full_p}' from disk: {e}")
                         errors += 1
 
-    db.checkpoint()
+    # Signal consumers that the catalog changed, then leave it quiescent for readers.
+    if removed_count or added_count:
+        db.bump_generation()
+    db.finalize()
 
     return {
         "removed_records": removed_count,

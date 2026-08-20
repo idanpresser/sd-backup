@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
         self.config_path = config_path or os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
         self.worker: Optional[BackupWorker] = None
         self.fastcopy_path = ""
+        self._rescan_full_drive = False
 
         self._init_ui()
         self._setup_logging()
@@ -219,6 +220,14 @@ class MainWindow(QMainWindow):
                         if self.drive_selector.move_cb.isEnabled():
                             self.drive_selector.move_cb.setChecked(sub_opts["move_mode"])
 
+                    media_exts = cfg.get("media_extensions", [])
+                    if media_exts:
+                        from utils.media_filter import set_active_media_extensions
+                        set_active_media_extensions(media_exts)
+
+                    self.drive_selector.rescan_cb.setChecked(bool(cfg.get("auto_rescan_after_import", False)))
+                    self._rescan_full_drive = bool(cfg.get("rescan_full_drive", False))
+
                     self.drive_selector.update_move_mode_availability()
 
             except Exception as e:
@@ -227,12 +236,16 @@ class MainWindow(QMainWindow):
     def save_config(self):
         """Saves current GUI preferences to config.json."""
         try:
+            from utils.media_filter import get_active_media_extensions
             cfg = {
                 "source_path": self.drive_selector.get_selected_drive_path(),
                 "target_directory": self.drive_selector.get_target_directory(),
                 "custom_suffix": self.drive_selector.get_custom_suffix(),
                 "fastcopy_path": self.fastcopy_path,
-                "subfolder_options": self.drive_selector.get_selected_options()
+                "media_extensions": sorted(list(get_active_media_extensions())),
+                "subfolder_options": self.drive_selector.get_selected_options(),
+                "auto_rescan_after_import": self.drive_selector.get_auto_rescan(),
+                "rescan_full_drive": getattr(self, "_rescan_full_drive", False),
             }
             os.makedirs(os.path.dirname(os.path.abspath(self.config_path)), exist_ok=True)
             with open(self.config_path, "w", encoding="utf-8") as f:
@@ -274,7 +287,9 @@ class MainWindow(QMainWindow):
             fastcopy_path=self.fastcopy_path,
             custom_suffix=suffix,
             folder_opts=folder_opts,
-            move_mode=is_move
+            move_mode=is_move,
+            auto_rescan=self.drive_selector.get_auto_rescan(),
+            rescan_full_drive=getattr(self, "_rescan_full_drive", False),
         )
 
         # Wire worker signals to GUI
@@ -363,10 +378,24 @@ class MainWindow(QMainWindow):
         self.alert_banner.show_alert(f"Fatal Error: {fatal_err}", level="ERROR")
         self.log_console.append_trace(f"🛑 FATAL ERROR: {fatal_err}")
 
-    def closeEvent(self, event):
-        """Save preferences on window exit."""
-        self.save_config()
+    def stop_threads(self):
+        """Safely terminates all background child threads."""
+        if hasattr(self, "drive_selector") and self.drive_selector:
+            self.drive_selector.stop_threads()
+        if hasattr(self, "db_catalog_widget") and self.db_catalog_widget:
+            self.db_catalog_widget.stop_threads()
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
-            self.worker.wait(2000)
+            self.worker.wait(1000)
+
+    def closeEvent(self, event):
+        """Save preferences and stop workers on window exit."""
+        self.save_config()
+        self.stop_threads()
         event.accept()
+
+    def __del__(self):
+        try:
+            self.stop_threads()
+        except Exception:
+            pass

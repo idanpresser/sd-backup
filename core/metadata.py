@@ -9,6 +9,11 @@ from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 import exifread
 from pymediainfo import MediaInfo
+from utils.media_filter import (
+    DEFAULT_IMAGE_EXTENSIONS,
+    DEFAULT_VIDEO_EXTENSIONS,
+    DEFAULT_AUDIO_EXTENSIONS,
+)
 
 
 def _parse_exif_ratio(val) -> float:
@@ -56,14 +61,21 @@ def _parse_gps_coords(tags: dict) -> Tuple[Optional[float], Optional[float], Opt
 class MetadataExtractor:
     """Extracts Date Taken, unique composite hashes, and extended EXIF/MediaInfo metadata catalog fields."""
 
-    IMAGE_EXTENSIONS = (
+    # Capture-date extraction eligibility is kept in sync with the media_filter
+    # whitelist (what actually gets cataloged) so no cataloged format silently skips
+    # EXIF/MediaInfo and falls through to mtime. Legacy extras are unioned in so nothing
+    # that previously worked regresses. See sd_backup-axi.
+    _LEGACY_IMAGE_EXTENSIONS = {
         '.jpg', '.jpeg', '.tif', '.tiff', '.heic',
-        '.nef', '.cr2', '.cr3', '.arw', '.dng', '.raw', 
-        '.orf', '.rw2', '.pef', '.raf', '.srw', '.erf', '.3fr', '.iiq', '.nrw'
-    )
-    VIDEO_EXTENSIONS = (
-        '.mp4', '.mov', '.mxf', '.crm', '.ari', '.avi', '.mkv', '.braw', '.mts', '.m2ts'
-    )
+        '.nef', '.cr2', '.cr3', '.arw', '.dng', '.raw',
+        '.orf', '.rw2', '.pef', '.raf', '.srw', '.erf', '.3fr', '.iiq', '.nrw',
+    }
+    _LEGACY_VIDEO_EXTENSIONS = {
+        '.mp4', '.mov', '.mxf', '.crm', '.ari', '.avi', '.mkv', '.braw', '.mts', '.m2ts',
+    }
+    IMAGE_EXTENSIONS = frozenset(DEFAULT_IMAGE_EXTENSIONS | _LEGACY_IMAGE_EXTENSIONS)
+    VIDEO_EXTENSIONS = frozenset(DEFAULT_VIDEO_EXTENSIONS | _LEGACY_VIDEO_EXTENSIONS)
+    AUDIO_EXTENSIONS = frozenset(DEFAULT_AUDIO_EXTENSIONS)
 
     @staticmethod
     def get_file_size(file_path: str) -> int:
@@ -94,8 +106,13 @@ class MetadataExtractor:
             except Exception:
                 pass
 
-        # 2. PyMediaInfo Extraction for Videos
-        if ext in cls.VIDEO_EXTENSIONS:
+        # 2. PyMediaInfo Extraction for videos, audio, and any image the EXIF path
+        #    could not date (e.g. HEIC/PNG/WebP, which exifread often can't parse).
+        if (
+            ext in cls.VIDEO_EXTENSIONS
+            or ext in cls.AUDIO_EXTENSIONS
+            or ext in cls.IMAGE_EXTENSIONS
+        ):
             try:
                 media_info = MediaInfo.parse(file_path)
                 for track in media_info.tracks:

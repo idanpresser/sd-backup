@@ -8,10 +8,22 @@ from PySide6.QtWidgets import (
     QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, 
     QComboBox, QPushButton, QLineEdit, QCheckBox, QFileDialog
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QThread
 from utils.drive_detector import get_available_drives, is_same_drive
 from utils.path_formatter import normalize_win_path
 from core.mtp_engine import is_mtp_path, browse_with_windows_shell
+
+
+class DriveDetectorWorker(QThread):
+    """Background worker to enumerate drives & MTP devices without freezing the GUI."""
+    drives_detected = Signal(list)
+
+    def run(self):
+        try:
+            drives = get_available_drives()
+        except Exception:
+            drives = []
+        self.drives_detected.emit(drives)
 
 
 class DriveSelectorWidget(QGroupBox):
@@ -23,8 +35,25 @@ class DriveSelectorWidget(QGroupBox):
 
     def __init__(self, parent=None):
         super().__init__("SOURCE SELECTION (SD CARDS & MOBILE PHONES) & DESTINATION SETUP", parent)
+        self._detector_worker: Optional[DriveDetectorWorker] = None
         self._init_ui()
-        self.refresh_drives()
+        self.refresh_drives(blocking=False)
+
+    def stop_threads(self):
+        """Safely stops any background detector thread before destruction."""
+        if self._detector_worker and self._detector_worker.isRunning():
+            self._detector_worker.quit()
+            self._detector_worker.wait(1000)
+
+    def closeEvent(self, event):
+        self.stop_threads()
+        super().closeEvent(event)
+
+    def __del__(self):
+        try:
+            self.stop_threads()
+        except Exception:
+            pass
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -42,7 +71,7 @@ class DriveSelectorWidget(QGroupBox):
         
         self.refresh_btn = QPushButton("Refresh Devices")
         self.refresh_btn.setFixedWidth(115)
-        self.refresh_btn.clicked.connect(self.refresh_drives)
+        self.refresh_btn.clicked.connect(lambda: self.refresh_drives(blocking=False))
 
         self.browse_src_btn = QPushButton("Browse Folder...")
         self.browse_src_btn.setFixedWidth(115)
@@ -95,15 +124,28 @@ class DriveSelectorWidget(QGroupBox):
         self.move_cb.setEnabled(False)
         self.move_cb.setToolTip("Move mode is only available when source and target are on the same local drive.")
 
+        self.rescan_cb = QCheckBox("🔄 Reconcile & rescan destination on finish")
+        self.rescan_cb.setChecked(False)
+        self.rescan_cb.setToolTip(
+            "After the backup, re-scan the destination date folders just written to, index any "
+            "files that were added outside this app, and backfill missing metadata."
+        )
+
         self.dcim_cb.stateChanged.connect(self._on_options_changed)
         self.private_cb.stateChanged.connect(self._on_options_changed)
         self.full_vol_cb.stateChanged.connect(self._on_full_vol_changed)
         self.move_cb.stateChanged.connect(self._on_options_changed)
 
+        self.btn_ext_filter = QPushButton("⚙️ Extension Filter...")
+        self.btn_ext_filter.setToolTip("Configure allowed photo/video/audio extensions and add custom formats")
+        self.btn_ext_filter.clicked.connect(self._open_extension_filter_dialog)
+
         opts_layout.addWidget(self.dcim_cb)
         opts_layout.addWidget(self.private_cb)
         opts_layout.addWidget(self.full_vol_cb)
         opts_layout.addWidget(self.move_cb)
+        opts_layout.addWidget(self.rescan_cb)
+        opts_layout.addWidget(self.btn_ext_filter)
 
         main_layout.addLayout(opts_layout)
 
@@ -113,11 +155,30 @@ class DriveSelectorWidget(QGroupBox):
         self.same_drive_info.hide()
         main_layout.addWidget(self.same_drive_info)
 
-    def refresh_drives(self):
-        """Enumerates connected drive letters and MTP phone devices."""
+    def refresh_drives(self, blocking: bool = False):
+        """Enumerates connected drive letters and MTP phone devices asynchronously."""
+        if blocking:
+            drives = get_available_drives()
+            self._on_drives_detected(drives)
+            return
+
+        if self._detector_worker and self._detector_worker.isRunning():
+            return
+
+        self.refresh_btn.setEnabled(False)
+        self.refresh_btn.setText("⏳ Scanning...")
+        
+        if self.drive_combo.count() == 0:
+            self.drive_combo.addItem("⏳ Scanning connected drives & mobile devices...", "")
+
+        self._detector_worker = DriveDetectorWorker(self)
+        self._detector_worker.drives_detected.connect(self._on_drives_detected)
+        self._detector_worker.start()
+
+    def _on_drives_detected(self, drives: list):
+        """Callback invoked when background drive detection completes."""
         current_text = self.get_selected_drive_path()
         self.drive_combo.clear()
-        drives = get_available_drives()
 
         if not drives:
             self.drive_combo.addItem("No removable drives or MTP devices detected", "")
@@ -137,6 +198,8 @@ class DriveSelectorWidget(QGroupBox):
         if current_text:
             self.set_selected_source_path(current_text)
 
+        self.refresh_btn.setEnabled(True)
+        self.refresh_btn.setText("Refresh Devices")
         self.update_move_mode_availability()
 
     def _browse_source_folder(self):
@@ -161,6 +224,12 @@ class DriveSelectorWidget(QGroupBox):
             norm_f = normalize_win_path(folder)
             self.target_input.setText(norm_f)
             self.target_changed.emit(norm_f)
+
+    def _open_extension_filter_dialog(self):
+        """Opens the Media Extension Filter configuration dialog."""
+        from app.components.extension_filter_dialog import MediaExtensionFilterDialog
+        dialog = MediaExtensionFilterDialog(parent=self)
+        dialog.exec()
 
     def _on_paths_updated(self):
         self.update_move_mode_availability()
@@ -231,6 +300,9 @@ class DriveSelectorWidget(QGroupBox):
 
     def get_is_move_mode(self) -> bool:
         return self.move_cb.isEnabled() and self.move_cb.isChecked()
+
+    def get_auto_rescan(self) -> bool:
+        return self.rescan_cb.isChecked()
 
     def get_selected_options(self) -> dict:
         return {

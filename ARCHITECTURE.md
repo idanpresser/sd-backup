@@ -121,7 +121,56 @@ CREATE TABLE IF NOT EXISTS transfer_manifest (
     transferred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(composite_hash) REFERENCES file_catalog(composite_hash)
 );
+
+-- Extended per-file metadata (EXIF / MediaInfo / ExifTool). Populated inline during
+-- backup and repairable via backfill_missing_metadata().
+CREATE TABLE IF NOT EXISTS file_metadata (
+    metadata_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    composite_hash TEXT UNIQUE NOT NULL,
+    original_filename TEXT NOT NULL,
+    camera_make TEXT, camera_model TEXT, lens_model TEXT, serial_number TEXT,
+    iso INTEGER, aperture TEXT, shutter_speed TEXT, focal_length TEXT, white_balance TEXT,
+    width INTEGER, height INTEGER, aspect_ratio TEXT, color_space TEXT,
+    video_codec TEXT, container_format TEXT, frame_rate REAL, duration_seconds REAL,
+    bitrate INTEGER, audio_codec TEXT, audio_channels INTEGER, audio_sample_rate INTEGER,
+    latitude REAL, longitude REAL, altitude REAL,
+    raw_json TEXT,
+    FOREIGN KEY(composite_hash) REFERENCES file_catalog(composite_hash)
+);
+
+-- Published contract metadata for external consumers. 'generation' is a monotonic
+-- counter bumped at the end of every import and reconcile; 'last_import' is the wall
+-- clock of the last bump. A consumer polls 'generation' to know the catalog changed.
+CREATE TABLE IF NOT EXISTS catalog_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 ```
+
+### 3.1 Published contract for QuickImageCullLAN (read-only consumer)
+
+`QuickImageCullLAN` attaches `.sd_backup_catalog.db` **read-only and `immutable=1`** and joins
+everything on `composite_hash`. It never writes to this database and depends only on its
+schema. The following are a **stable API — do not rename or drop without coordinating**
+with that project:
+
+- `file_catalog`: `composite_hash`, `target_relative_path`, `date_taken`, `file_size_bytes`,
+  plus `original_filename` / `destination_filename` for display.
+- `file_metadata`: `metadata_id`, `composite_hash`, `camera_make`, `camera_model`,
+  `lens_model`, `width`, `height`, `video_codec`, `container_format`, `frame_rate`,
+  `duration_seconds`, `latitude`, `longitude`.
+- `catalog_meta`: the `generation` change signal.
+
+Two invariants the consumer relies on:
+
+1. **`target_relative_path` is always archive-relative** — no drive letter, UNC, leading
+   separator, or `..`. `register_file()` enforces this (unsafe values are stored `NULL`),
+   because the consumer joins `archive_root / target_relative_path` and rejects anything
+   that escapes the root.
+2. **The catalog is left quiescent at session end** — `finalize()` TRUNCATE-checkpoints the
+   WAL and drops the `-wal`/`-shm` sidecars, and `generation` is only bumped after that
+   checkpoint. An `immutable=1` reader ignores the WAL, so it must be flushed for the
+   reader to see committed rows and never read a torn page.
 
 ---
 

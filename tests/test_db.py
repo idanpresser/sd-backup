@@ -132,7 +132,10 @@ def test_original_and_destination_filenames(temp_target_dir):
         row = dict(cursor.fetchone())
         assert row["original_filename"] == "DJI_0113.MP4"
         assert row["destination_filename"] == "20260811_150626_IdanPresser(C)_0113.MP4"
-        assert row["target_relative_path"] == "2026/2026-08/2026-08-11/20260811_150626_IdanPresser(C)_0113.MP4"
+        # register_file normalizes separators to the OS style (Windows-style backslashes
+        # in the catalog); compare separator-agnostically.
+        assert row["target_relative_path"].replace("\\", "/") == \
+            "2026/2026-08/2026-08-11/20260811_150626_IdanPresser(C)_0113.MP4"
 
 
 def test_migration_purges_duplicate_skipped(temp_target_dir):

@@ -6,6 +6,10 @@ __pycache__/
 bin/*.log
 bin/FSViewer*/
 
+# ExifTool binary (vendored locally, not committed)
+bin/exiftool.exe
+bin/exiftool_files/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

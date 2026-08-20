@@ -16,9 +16,13 @@ STACK_KEYWORDS = {"PANO", "PANORAMA", "BURST", "HDR", "STACK", "TIMELAPSE", "STE
 
 # Shooting modes & special tag keywords to preserve in uppercase
 SPECIAL_TAGS = {
+    # Pixel Shooting Modes & Frame Qualifiers
     "PANO", "PANORAMA", "BURST", "HDR", "STACK", "TIMELAPSE", 
-    "HYPERLAPSE", "PORTRAIT", "NIGHT", "SLOWMO", "SLOW_MO", 
-    "STEREO", "3D", "RAW", "EDITED", "COLLAGE", "PRO", "TRASH", "CLIP"
+    "HYPERLAPSE", "PORTRAIT", "NIGHT", "SLOWMO", "SLOW_MO", "SLOWMOTION",
+    "LONG_EXPOSURE", "ACTION_PAN", "ASTRO", "CINEMATIC", "MP",
+    "COVER", "ORIGINAL", "LONG", "EXPOSURE", "ACTION", "PAN",
+    # Universal Photography & Post-Processing Tags
+    "STEREO", "3D", "RAW", "DNG", "EDITED", "COLLAGE", "PRO", "TRASH", "CLIP"
 }
 
 # Drone / Action sub-channel single letter flags (e.g., DJI D-Log, Wide, Zoom, Thermal)
@@ -47,29 +51,54 @@ def sanitize_path(path_str: str) -> str:
     return sanitized.strip()
 
 
+def is_safe_relative_path(path_str: str) -> bool:
+    """Returns True iff path_str is a safe archive-relative path.
+
+    Rejects empty strings, absolute paths, Windows drive letters (C:), UNC prefixes
+    (\\\\server, //server), leading separators, and any '..' parent-directory escape.
+    This is the contract QuickImageCullLAN enforces before joining archive_root; a path
+    that fails here would be rejected (silently un-cullable) or, worse, escape the root.
+    """
+    if not path_str:
+        return False
+    s = path_str.replace("\\", "/")
+    if s.startswith("/"):                 # leading sep, POSIX-absolute, or //UNC
+        return False
+    if re.match(r'^[A-Za-z]:', s):        # Windows drive letter
+        return False
+    if os.path.isabs(path_str):
+        return False
+    segments = [seg for seg in s.split("/") if seg not in ("", ".")]
+    if any(seg == ".." for seg in segments):
+        return False
+    return bool(segments)
+
+
 def extract_sequence_and_clean_stem(original_filename: str) -> Tuple[str, str]:
     """
-    Extracts clip sequence numbers, strips generic camera/brand prefixes (IMG_, DJI_, DSC, etc.) 
+    Extracts clip sequence numbers, strips generic camera/brand prefixes (IMG_, DJI_, DSC, PXL_, etc.) 
     and redundant embedded timestamps from filename stem, while preserving custom names and 
-    special shooting tags (PANO, BURST, HDR, D, TIMELAPSE, etc.).
+    special shooting tags (PANO, BURST, LONG_EXPOSURE, PORTRAIT, ACTION_PAN, COVER, ORIGINAL, D, etc.).
 
     Examples:
-      'DJI_20260811150626_0113_D.MP4' -> ('0113_D', '0113')
-      'IMG_20260811_150626_0452.JPG'  -> ('0452', '0452')
-      'DSC00123.JPG'                 -> ('00123', '00123')
-      'IMG_0001.JPG'                 -> ('0001', '0001')
-      'PXL_20260811_150626123.PANO.jpg' -> ('PANO', '')
-      'IMG_20260811_150626.JPG'      -> ('', '')
+      'PXL_20260817_151604782.jpg'                      -> ('', '')
+      'PXL_20260817_155509587.PANO.jpg'                 -> ('PANO', '')
+      'PXL_20260806_124210009.LONG_EXPOSURE-01.jpg'      -> ('LONG_EXPOSURE_01', '01')
+      'PXL_20260806_124210009.LONG_EXPOSURE-01.COVER.jpg' -> ('LONG_EXPOSURE_01_COVER', '01')
+      'PXL_20260806_124210009.PORTRAIT-02.ORIGINAL.jpg'  -> ('PORTRAIT_02_ORIGINAL', '02')
+      'DJI_20260811150626_0113_D.MP4'                   -> ('0113_D', '0113')
+      'IMG_20260811_150626_0452.JPG'                    -> ('0452', '0452')
+      'DSC00123.JPG'                                    -> ('00123', '00123')
     """
     stem = os.path.splitext(os.path.basename(original_filename))[0]
 
     # 1. Detect and strip embedded timestamp patterns
     timestamp_patterns = [
-        r'(?:19|20)\d{15}',                   # 17-digit timestamp e.g. 20260811150626123
-        r'(?:19|20)\d{12}',                   # 14-digit YYYYMMDDHHMMSS e.g. 20260811150626
-        r'(?:19|20)\d{6}[_\-.]\d{6}(?:\d{3})?', # YYYYMMDD_HHMMSS or YYYYMMDD_HHMMSS123
+        r'(?:19|20)\d{15}',                        # 17-digit timestamp e.g. 20260811150626123
+        r'(?:19|20)\d{12}',                        # 14-digit YYYYMMDDHHMMSS e.g. 20260811150626
+        r'(?:19|20)\d{6}[_\-.]\d{6}(?:\d{1,9})?',  # YYYYMMDD_HHMMSS or YYYYMMDD_HHMMSSxxx (Pixel 9-digit e.g. 151604782)
         r'(?:19|20)\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}',  # YYYY-MM-DD-HH-MM-SS
-        r'(?:19|20)\d{6}'                     # 8-digit date YYYYMMDD
+        r'(?:19|20)\d{6}'                          # 8-digit date YYYYMMDD
     ]
 
     cleaned_stem = stem
@@ -80,7 +109,8 @@ def extract_sequence_and_clean_stem(original_filename: str) -> Tuple[str, str]:
     cleaned_stem = GENERIC_PREFIX_REGEX.sub('', cleaned_stem)
 
     # Clean up residual multiple underscores, dots, or hyphens
-    cleaned_stem = re.sub(r'[_\-.]{2,}', '_', cleaned_stem).replace('.', '_').strip('_- ')
+    cleaned_stem = re.sub(r'[\-.]', '_', cleaned_stem)
+    cleaned_stem = re.sub(r'_+', '_', cleaned_stem).strip('_- ')
 
     # Canonicalize uppercase for special mode tags and drone flags
     if cleaned_stem:

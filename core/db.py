@@ -4,7 +4,11 @@ Maintains state catalog, volume records, and transfer manifests with WAL mode en
 """
 import sqlite3
 import os
+import gc
+import logging
 from typing import Optional, List, Dict, Any
+
+from utils.path_formatter import normalize_win_path, is_safe_relative_path
 
 
 class DatabaseManager:
@@ -86,6 +90,20 @@ class DatabaseManager:
                     raw_json TEXT,
                     FOREIGN KEY(composite_hash) REFERENCES file_catalog(composite_hash)
                 );
+
+                -- Published contract metadata for external consumers (e.g. the culler).
+                -- 'generation' is a monotonic counter bumped on every import/reconcile so
+                -- a consumer can cheaply detect that the catalog changed; 'last_import'
+                -- is the wall-clock time of the last bump.
+                CREATE TABLE IF NOT EXISTS catalog_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_file_catalog_hash ON file_catalog(composite_hash);
+                CREATE INDEX IF NOT EXISTS idx_manifest_hash ON transfer_manifest(composite_hash);
+                CREATE INDEX IF NOT EXISTS idx_manifest_status ON transfer_manifest(copy_status);
+                CREATE INDEX IF NOT EXISTS idx_metadata_hash ON file_metadata(composite_hash);
             """)
             # Schema Migration: Add missing columns to file_catalog if upgrading from legacy DB
             cursor = conn.cursor()
@@ -122,6 +140,22 @@ class DatabaseManager:
         target_relative_path: Optional[str] = None
     ):
         """Registers a discovered or transferred file into the file_catalog table."""
+        # Guard the single catalog write path: never persist a non-archive-relative
+        # target path. The culler joins archive_root / target_relative_path and rejects
+        # absolute/drive-lettered/UNC/'..'-escaping paths, so storing one here would make
+        # the file silently un-cullable (or enable a path escape). Normalize, then drop to
+        # NULL if it is not safe rather than poisoning the catalog. See sd_backup-vmp.
+        if target_relative_path is not None:
+            normalized_rel = normalize_win_path(target_relative_path)
+            if is_safe_relative_path(normalized_rel):
+                target_relative_path = normalized_rel
+            else:
+                logging.warning(
+                    f"register_file: unsafe target_relative_path '{target_relative_path}' "
+                    f"for '{filename}'; storing NULL to keep the catalog archive-relative."
+                )
+                target_relative_path = None
+
         with self._get_connection() as conn:
             conn.execute("""
                 INSERT INTO file_catalog (
@@ -282,16 +316,8 @@ class DatabaseManager:
         if not missing_items:
             return 0
 
-        # Build disk lookup index for target_dir
-        disk_file_index = {}
+        disk_file_index = None
         norm_target = normalize_win_path(os.path.abspath(self.target_dir))
-        if os.path.exists(norm_target):
-            for root, _, files in os.walk(norm_target):
-                for f in files:
-                    fp = normalize_win_path(os.path.join(root, f))
-                    disk_file_index[f.lower()] = fp
-                    rel = normalize_win_path(os.path.relpath(fp, norm_target))
-                    disk_file_index[rel.lower()] = fp
 
         backfilled_count = 0
         for item in missing_items:
@@ -309,14 +335,26 @@ class DatabaseManager:
                 target_file_path = normalize_win_path(os.path.join(self.target_dir, target_rel_p))
             elif rel_p and os.path.exists(normalize_win_path(os.path.join(self.target_dir, rel_p))):
                 target_file_path = normalize_win_path(os.path.join(self.target_dir, rel_p))
-            elif target_rel_p and target_rel_p.lower() in disk_file_index:
-                target_file_path = disk_file_index[target_rel_p.lower()]
-            elif rel_p.lower() in disk_file_index:
-                target_file_path = disk_file_index[rel_p.lower()]
-            elif dest_fname and dest_fname.lower() in disk_file_index:
-                target_file_path = disk_file_index[dest_fname.lower()]
-            elif fname and fname.lower() in disk_file_index:
-                target_file_path = disk_file_index[fname.lower()]
+            else:
+                # Lazy-build disk index only if direct paths failed
+                if disk_file_index is None:
+                    disk_file_index = {}
+                    if os.path.exists(norm_target):
+                        for root, _, files in os.walk(norm_target):
+                            for f in files:
+                                fp = normalize_win_path(os.path.join(root, f))
+                                disk_file_index[f.lower()] = fp
+                                rel = normalize_win_path(os.path.relpath(fp, norm_target))
+                                disk_file_index[rel.lower()] = fp
+
+                if target_rel_p and target_rel_p.lower() in disk_file_index:
+                    target_file_path = disk_file_index[target_rel_p.lower()]
+                elif rel_p.lower() in disk_file_index:
+                    target_file_path = disk_file_index[rel_p.lower()]
+                elif dest_fname and dest_fname.lower() in disk_file_index:
+                    target_file_path = disk_file_index[dest_fname.lower()]
+                elif fname and fname.lower() in disk_file_index:
+                    target_file_path = disk_file_index[fname.lower()]
 
             if target_file_path and os.path.exists(target_file_path):
                 try:
@@ -332,10 +370,89 @@ class DatabaseManager:
         return backfilled_count
 
 
+    def get_generation(self) -> int:
+        """Returns the catalog generation counter (0 if never bumped)."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM catalog_meta WHERE key = 'generation'"
+            ).fetchone()
+            if not row or row["value"] is None:
+                return 0
+            try:
+                return int(row["value"])
+            except (TypeError, ValueError):
+                return 0
+
+    def bump_generation(self) -> int:
+        """Increments the monotonic catalog generation and records last_import time.
+
+        Consumers that attach the catalog read-only/immutable poll this value to decide
+        when to re-open and re-scan. Pair with finalize() at session end so the bumped
+        value is checkpointed together with the rows it accounts for.
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO catalog_meta (key, value) VALUES ('generation', '1')
+                ON CONFLICT(key) DO UPDATE SET
+                    value = CAST(CAST(catalog_meta.value AS INTEGER) + 1 AS TEXT)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO catalog_meta (key, value) VALUES ('last_import', CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET value = CURRENT_TIMESTAMP
+                """
+            )
+            row = conn.execute(
+                "SELECT value FROM catalog_meta WHERE key = 'generation'"
+            ).fetchone()
+            return int(row["value"])
+
     def checkpoint(self):
         """Runs a WAL checkpoint to flush WAL logs to disk."""
         with self._get_connection() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+
+    def finalize(self):
+        """Leave the catalog quiescent for external readers at end of session.
+
+        QuickImageCullLAN attaches this database with ?mode=ro&immutable=1, which makes
+        SQLite ignore the -wal/-shm sidecars entirely and skip change detection. If a
+        committed transaction still lives only in the WAL, that reader silently misses
+        it; if it opens mid-write, it can read a torn page. So on session end we flush
+        the WAL into the main file (TRUNCATE checkpoint) and switch the journal back to
+        DELETE mode, which removes the -wal/-shm sidecars once the connection closes.
+        The next write re-enters WAL automatically via _get_connection().
+        """
+        # Phase 1: flush every committed frame from the WAL into the main db file.
+        # After a TRUNCATE checkpoint the -wal is emptied, so an immutable reader already
+        # sees all committed data safely even if the sidecar files still exist.
+        conn = self._get_connection()
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Other methods open connections via `with self._get_connection()`, which commits
+        # but does not close; those lingering handles hold the shared WAL lock and would
+        # block the DELETE-mode conversion below. Collect them first.
+        gc.collect()
+
+        # Phase 2: convert out of WAL so the -wal/-shm sidecars are removed on close.
+        # Best-effort: if a reader still holds the file, the already-emptied WAL is safe.
+        try:
+            conn = self._get_connection()
+            try:
+                conn.execute("PRAGMA journal_mode=DELETE;")
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.OperationalError as exc:
+            logging.warning(
+                f"finalize: WAL flushed but could not drop sidecars (still locked): {exc}"
+            )
 
 
 
