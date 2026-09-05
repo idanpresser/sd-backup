@@ -96,7 +96,16 @@ def resolve_fastcopy_executable(custom_path: Optional[str] = None) -> Optional[s
         if os.path.exists(candidate):
             return candidate
 
-    # 3. Check module directory bin
+    # 3. Check bundled / resource bin directory
+    try:
+        from utils.resource_path import get_bin_path
+        for name in executable_names:
+            candidate = get_bin_path(name)
+            if os.path.exists(candidate):
+                return candidate
+    except Exception:
+        pass
+
     module_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     module_bin = os.path.normpath(os.path.join(module_dir, "bin"))
     for name in executable_names:

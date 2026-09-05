@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, QThread
 from utils.drive_detector import get_available_drives, is_same_drive
+from app.components.flow_layout import FlowLayout
 from utils.path_formatter import normalize_win_path
 from core.mtp_engine import is_mtp_path, browse_with_windows_shell
 
@@ -62,19 +63,22 @@ class DriveSelectorWidget(QGroupBox):
         # 1. Source Drive / Phone Selection Row
         drive_layout = QHBoxLayout()
         drive_label = QLabel("Source Device/Path:")
-        drive_label.setFixedWidth(120)
+        drive_label.setMinimumWidth(120)
         
         self.drive_combo = QComboBox()
         self.drive_combo.setEditable(True)
         self.drive_combo.setMinimumWidth(300)
+        # Drive entries carry long labels ("D:\\ [SDCARD] - Removable (12.3 GB free of
+        # 32.0 GB)"). Without this the widest entry sets the widget's minimum width and
+        # drags the whole window's minimum out with it.
+        self.drive_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.drive_combo.setMinimumContentsLength(20)
         self.drive_combo.currentTextChanged.connect(self._on_paths_updated)
         
         self.refresh_btn = QPushButton("Refresh Devices")
-        self.refresh_btn.setFixedWidth(115)
         self.refresh_btn.clicked.connect(lambda: self.refresh_drives(blocking=False))
 
         self.browse_src_btn = QPushButton("Browse Folder...")
-        self.browse_src_btn.setFixedWidth(115)
         self.browse_src_btn.clicked.connect(self._browse_source_folder)
 
         drive_layout.addWidget(drive_label)
@@ -86,13 +90,12 @@ class DriveSelectorWidget(QGroupBox):
         # 2. Target Directory Row
         target_layout = QHBoxLayout()
         target_label = QLabel("Backup Target:")
-        target_label.setFixedWidth(120)
+        target_label.setMinimumWidth(120)
         self.target_input = QLineEdit()
         self.target_input.setPlaceholderText("Select target destination folder...")
         self.target_input.textChanged.connect(self._on_paths_updated)
         
         self.browse_btn = QPushButton("Browse Target...")
-        self.browse_btn.setFixedWidth(115)
         self.browse_btn.clicked.connect(self._browse_target_folder)
 
         target_layout.addWidget(target_label)
@@ -104,13 +107,16 @@ class DriveSelectorWidget(QGroupBox):
         opts_layout = QHBoxLayout()
         
         suffix_label = QLabel("Custom Suffix:")
-        suffix_label.setFixedWidth(120)
+        suffix_label.setMinimumWidth(120)
         self.suffix_input = QLineEdit()
         self.suffix_input.setPlaceholderText("e.g. MAVIC or PIXEL8 (Optional)")
         opts_layout.addWidget(suffix_label)
         opts_layout.addWidget(self.suffix_input, 1)
 
-        opts_layout.addSpacing(15)
+        main_layout.addLayout(opts_layout)
+
+        # 3b. Toggle row - a FlowLayout so long labels wrap instead of being clipped
+        toggles_layout = FlowLayout(margin=0, h_spacing=14, v_spacing=6)
 
         self.dcim_cb = QCheckBox("DCIM/")
         self.dcim_cb.setChecked(True)
@@ -140,17 +146,18 @@ class DriveSelectorWidget(QGroupBox):
         self.btn_ext_filter.setToolTip("Configure allowed photo/video/audio extensions and add custom formats")
         self.btn_ext_filter.clicked.connect(self._open_extension_filter_dialog)
 
-        opts_layout.addWidget(self.dcim_cb)
-        opts_layout.addWidget(self.private_cb)
-        opts_layout.addWidget(self.full_vol_cb)
-        opts_layout.addWidget(self.move_cb)
-        opts_layout.addWidget(self.rescan_cb)
-        opts_layout.addWidget(self.btn_ext_filter)
+        toggles_layout.addWidget(self.dcim_cb)
+        toggles_layout.addWidget(self.private_cb)
+        toggles_layout.addWidget(self.full_vol_cb)
+        toggles_layout.addWidget(self.move_cb)
+        toggles_layout.addWidget(self.rescan_cb)
+        toggles_layout.addWidget(self.btn_ext_filter)
 
-        main_layout.addLayout(opts_layout)
+        main_layout.addLayout(toggles_layout)
 
         # 4. Indicator Banner
         self.same_drive_info = QLabel("⚡ Same drive detected: Instant 0-byte Move Mode available.")
+        self.same_drive_info.setWordWrap(True)
         self.same_drive_info.setStyleSheet("color: #00FFF5; font-size: 11px; font-weight: bold; margin-left: 125px;")
         self.same_drive_info.hide()
         main_layout.addWidget(self.same_drive_info)

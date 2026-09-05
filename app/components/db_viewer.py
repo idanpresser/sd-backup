@@ -13,15 +13,142 @@ from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QTextEdit, QMessageBox, QCheckBox, QRadioButton, QGroupBox, QListWidget, QListWidgetItem,
-    QFileDialog, QFormLayout
+    QFileDialog, QFormLayout, QProgressBar
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QFont, QIcon
+
+from app.components.flow_layout import FlowLayout
 
 from core.db import DatabaseManager
 from core.sync_engine import calculate_sync_diff, execute_sync
 from utils.maintenance import rename_suffix_in_backup
+from app.components.index_folder_dialog import IndexFolderDialog
 
+
+class CatalogLoaderWorker(QThread):
+    """Background thread to query database catalog records without blocking the UI."""
+    data_loaded = Signal(list)
+    error_occurred = Signal(str)
+
+    def __init__(self, target_dir: str, parent=None):
+        super().__init__(parent)
+        self.target_dir = target_dir
+
+    def run(self):
+        try:
+            if not self.target_dir or not os.path.exists(self.target_dir):
+                self.data_loaded.emit([])
+                return
+
+            db = DatabaseManager(self.target_dir)
+            with db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT 
+                        fc.file_id, fc.composite_hash, fc.original_filename, fc.relative_path,
+                        fc.destination_filename, fc.target_relative_path,
+                        fc.file_size_bytes, fc.date_taken, fc.date_taken_source,
+                        tm.copy_status, tm.destination_path,
+                        fm.camera_make, fm.camera_model, fm.lens_model, fm.serial_number,
+                        fm.iso, fm.aperture, fm.shutter_speed, fm.focal_length, fm.white_balance,
+                        fm.width, fm.height, fm.aspect_ratio, fm.color_space,
+                        fm.video_codec, fm.container_format, fm.frame_rate, fm.duration_seconds,
+                        fm.bitrate, fm.audio_codec, fm.audio_channels, fm.audio_sample_rate,
+                        fm.latitude, fm.longitude, fm.altitude, fm.raw_json
+                    FROM file_catalog fc
+                    LEFT JOIN transfer_manifest tm ON fc.composite_hash = tm.composite_hash
+                    LEFT JOIN file_metadata fm ON fc.composite_hash = fm.composite_hash
+                    ORDER BY fc.file_id DESC
+                """)
+                rows = [dict(row) for row in cursor.fetchall()]
+            self.data_loaded.emit(rows)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+class MetadataBackfillWorker(QThread):
+    """Background worker for extracting missing EXIF & MediaInfo metadata."""
+    completed = Signal(int)
+    error_occurred = Signal(str)
+
+    def __init__(self, target_dir: str, force_reextract: bool = False, parent=None):
+        super().__init__(parent)
+        self.target_dir = target_dir
+        self.force_reextract = force_reextract
+
+    def run(self):
+        try:
+            db = DatabaseManager(self.target_dir)
+            count = db.backfill_missing_metadata(force_reextract=self.force_reextract)
+            self.completed.emit(count)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+class SuffixRenamerWorker(QThread):
+    """Background worker for executing batch suffix renaming on disk and in database."""
+    completed = Signal(dict)
+    error_occurred = Signal(str)
+
+    def __init__(self, target_dir: str, old_suffix: str, new_suffix: str, file_list: Optional[str], parent=None):
+        super().__init__(parent)
+        self.target_dir = target_dir
+        self.old_suffix = old_suffix
+        self.new_suffix = new_suffix
+        self.file_list = file_list
+
+    def run(self):
+        try:
+            stats = rename_suffix_in_backup(
+                root_dir=self.target_dir,
+                old_suffix=self.old_suffix,
+                new_suffix=self.new_suffix,
+                file_list_path=self.file_list
+            )
+            self.completed.emit(stats)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+class SyncPreviewWorker(QThread):
+    """Background worker for calculating disk and database sync diff."""
+    diff_calculated = Signal(dict)
+    error_occurred = Signal(str)
+
+    def __init__(self, target_dir: str, parent=None):
+        super().__init__(parent)
+        self.target_dir = target_dir
+
+    def run(self):
+        try:
+            diff = calculate_sync_diff(self.target_dir)
+            self.diff_calculated.emit(diff)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+class SyncExecuteWorker(QThread):
+    """Background worker for executing disk and database synchronization."""
+    completed = Signal(dict)
+    error_occurred = Signal(str)
+
+    def __init__(self, target_dir: str, remove_missing: bool, uncat_action: str, parent=None):
+        super().__init__(parent)
+        self.target_dir = target_dir
+        self.remove_missing = remove_missing
+        self.uncat_action = uncat_action
+
+    def run(self):
+        try:
+            stats = execute_sync(
+                self.target_dir,
+                remove_missing=self.remove_missing,
+                uncataloged_action=self.uncat_action
+            )
+            self.completed.emit(stats)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
 
 
 class SuffixRenamerDialog(QDialog):
@@ -32,7 +159,23 @@ class SuffixRenamerDialog(QDialog):
         self.target_dir = target_dir
         self.setWindowTitle("Batch Suffix Renamer")
         self.resize(520, 260)
+        self._worker: Optional[SuffixRenamerWorker] = None
         self._init_ui()
+
+    def stop_threads(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(1000)
+
+    def closeEvent(self, event):
+        self.stop_threads()
+        super().closeEvent(event)
+
+    def __del__(self):
+        try:
+            self.stop_threads()
+        except Exception:
+            pass
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -93,27 +236,33 @@ class SuffixRenamerDialog(QDialog):
             QMessageBox.warning(self, "Input Required", "Please enter the old suffix to replace.")
             return
 
-        try:
-            stats = rename_suffix_in_backup(
-                root_dir=self.target_dir,
-                old_suffix=old_suf,
-                new_suffix=new_suf,
-                file_list_path=file_list
-            )
+        self.btn_run.setEnabled(False)
+        self.btn_run.setText("⏳ Renaming in Background...")
 
-            msg = (
-                f"Suffix Rename Operation Complete! 🎉\n\n"
-                f"• Scanned Files: {stats['scanned_count']}\n"
-                f"• Files Renamed: {stats['renamed_count']}\n"
-                f"• DB Catalog Records Updated: {stats['db_updated_count']}"
-            )
-            if stats['errors'] > 0:
-                msg += f"\n• Errors: {stats['errors']}"
+        self._worker = SuffixRenamerWorker(self.target_dir, old_suf, new_suf, file_list, self)
+        self._worker.completed.connect(self._on_rename_completed)
+        self._worker.error_occurred.connect(self._on_rename_error)
+        self._worker.start()
 
-            QMessageBox.information(self, "Rename Success", msg)
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, "Rename Error", f"Failed to execute suffix rename: {e}")
+    def _on_rename_completed(self, stats: dict):
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("⚡ Execute Rename")
+        msg = (
+            f"Suffix Rename Operation Complete! 🎉\n\n"
+            f"• Scanned Files: {stats['scanned_count']}\n"
+            f"• Files Renamed: {stats['renamed_count']}\n"
+            f"• DB Catalog Records Updated: {stats['db_updated_count']}"
+        )
+        if stats['errors'] > 0:
+            msg += f"\n• Errors: {stats['errors']}"
+
+        QMessageBox.information(self, "Rename Success", msg)
+        self.accept()
+
+    def _on_rename_error(self, err: str):
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("⚡ Execute Rename")
+        QMessageBox.critical(self, "Rename Error", f"Failed to execute suffix rename: {err}")
 
 
 class DBSyncDialog(QDialog):
@@ -124,8 +273,28 @@ class DBSyncDialog(QDialog):
         self.target_dir = target_dir
         self.setWindowTitle("Database & Disk Synchronization")
         self.resize(780, 520)
+        self._preview_worker: Optional[SyncPreviewWorker] = None
+        self._execute_worker: Optional[SyncExecuteWorker] = None
         self._init_ui()
-        self._load_preview()
+        self._load_preview(blocking=True)
+
+    def stop_threads(self):
+        if self._preview_worker and self._preview_worker.isRunning():
+            self._preview_worker.quit()
+            self._preview_worker.wait(1000)
+        if self._execute_worker and self._execute_worker.isRunning():
+            self._execute_worker.quit()
+            self._execute_worker.wait(1000)
+
+    def closeEvent(self, event):
+        self.stop_threads()
+        super().closeEvent(event)
+
+    def __del__(self):
+        try:
+            self.stop_threads()
+        except Exception:
+            pass
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -192,28 +361,49 @@ class DBSyncDialog(QDialog):
         btn_box.addWidget(btn_cancel)
         layout.addLayout(btn_box)
 
-    def _load_preview(self):
-        try:
-            diff = calculate_sync_diff(self.target_dir)
-            self.missing_list.clear()
-            self.uncataloged_list.clear()
+    def _load_preview(self, blocking: bool = False):
+        if blocking:
+            try:
+                diff = calculate_sync_diff(self.target_dir)
+                self._on_preview_calculated(diff)
+            except Exception as e:
+                self._on_preview_error(str(e))
+            return
 
-            for item in diff["missing_records"]:
-                text = f"❌ {item['original_filename']} ({item['destination_path']})"
-                self.missing_list.addItem(QListWidgetItem(text))
+        self.missing_list.clear()
+        self.uncataloged_list.clear()
+        self.missing_list.addItem(QListWidgetItem("⏳ Scanning disk and comparing with database catalog in background..."))
+        self.btn_apply.setEnabled(False)
 
-            for item in diff["uncataloged_files"]:
-                text = f"➕ {os.path.basename(item['file_path'])} ({item['relative_path']})"
-                self.uncataloged_list.addItem(QListWidgetItem(text))
+        self._preview_worker = SyncPreviewWorker(self.target_dir, self)
+        self._preview_worker.diff_calculated.connect(self._on_preview_calculated)
+        self._preview_worker.error_occurred.connect(self._on_preview_error)
+        self._preview_worker.start()
 
-            missing_cnt = len(diff["missing_records"])
-            uncat_cnt = len(diff["uncataloged_files"])
-            if missing_cnt == 0 and uncat_cnt == 0:
-                self.missing_list.addItem("✅ Catalog is fully synchronized with disk!")
-                self.btn_apply.setEnabled(False)
+    def _on_preview_calculated(self, diff: dict):
+        self.missing_list.clear()
+        self.uncataloged_list.clear()
 
-        except Exception as e:
-            QMessageBox.critical(self, "Sync Preview Error", f"Failed to compute sync diff: {e}")
+        for item in diff.get("missing_records", []):
+            text = f"❌ {item['original_filename']} ({item['destination_path']})"
+            self.missing_list.addItem(QListWidgetItem(text))
+
+        for item in diff.get("uncataloged_files", []):
+            text = f"➕ {os.path.basename(item['file_path'])} ({item['relative_path']})"
+            self.uncataloged_list.addItem(QListWidgetItem(text))
+
+        missing_cnt = len(diff.get("missing_records", []))
+        uncat_cnt = len(diff.get("uncataloged_files", []))
+        if missing_cnt == 0 and uncat_cnt == 0:
+            self.missing_list.addItem("✅ Catalog is fully synchronized with disk!")
+            self.btn_apply.setEnabled(False)
+        else:
+            self.btn_apply.setEnabled(True)
+
+    def _on_preview_error(self, err: str):
+        self.missing_list.clear()
+        self.missing_list.addItem(f"⚠️ Error computing sync diff: {err}")
+        QMessageBox.critical(self, "Sync Preview Error", f"Failed to compute sync diff: {err}")
 
     def _on_apply_sync(self):
         remove_missing = self.chk_remove_missing.isChecked()
@@ -239,25 +429,32 @@ class DBSyncDialog(QDialog):
             if reply != QMessageBox.Yes:
                 return
 
-        try:
-            stats = execute_sync(
-                self.target_dir,
-                remove_missing=remove_missing,
-                uncataloged_action=uncat_action
-            )
-            msg = (
-                f"Synchronization Complete! 🎉\n\n"
-                f"• Purged DB Records: {stats['removed_records']}\n"
-                f"• Indexed DB Records: {stats['added_records']}\n"
-                f"• Deleted Disk Files: {stats['deleted_disk_files']}"
-            )
-            if stats['errors'] > 0:
-                msg += f"\n• Errors: {stats['errors']}"
-            QMessageBox.information(self, "Sync Success", msg)
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, "Sync Failed", f"Failed to execute synchronization: {e}")
+        self.btn_apply.setEnabled(False)
+        self.btn_apply.setText("⏳ Applying Synchronization...")
 
+        self._execute_worker = SyncExecuteWorker(self.target_dir, remove_missing, uncat_action, self)
+        self._execute_worker.completed.connect(self._on_sync_completed)
+        self._execute_worker.error_occurred.connect(self._on_sync_error)
+        self._execute_worker.start()
+
+    def _on_sync_completed(self, stats: dict):
+        self.btn_apply.setEnabled(True)
+        self.btn_apply.setText("⚡ Apply Synchronization")
+        msg = (
+            f"Synchronization Complete! 🎉\n\n"
+            f"• Purged DB Records: {stats['removed_records']}\n"
+            f"• Indexed DB Records: {stats['added_records']}\n"
+            f"• Deleted Disk Files: {stats['deleted_disk_files']}"
+        )
+        if stats['errors'] > 0:
+            msg += f"\n• Errors: {stats['errors']}"
+        QMessageBox.information(self, "Sync Success", msg)
+        self.accept()
+
+    def _on_sync_error(self, err: str):
+        self.btn_apply.setEnabled(True)
+        self.btn_apply.setText("⚡ Apply Synchronization")
+        QMessageBox.critical(self, "Sync Failed", f"Failed to execute synchronization: {err}")
 
 
 class DBCatalogWidget(QWidget):
@@ -268,6 +465,8 @@ class DBCatalogWidget(QWidget):
         self.target_dir = target_dir
         self.db: Optional[DatabaseManager] = DatabaseManager(self.target_dir) if (self.target_dir and os.path.exists(self.target_dir)) else None
         self.rows_data: List[Dict[str, Any]] = []
+        self._loader_worker: Optional[CatalogLoaderWorker] = None
+        self._backfill_worker: Optional[MetadataBackfillWorker] = None
 
         # Debounced search timer (400ms delay to avoid stutter while typing/backspacing)
         self.search_timer = QTimer(self)
@@ -277,17 +476,36 @@ class DBCatalogWidget(QWidget):
 
         self._init_ui()
         if self.target_dir:
-            self.reload_catalog()
+            self.reload_catalog(blocking=True)
+
+    def stop_threads(self):
+        """Safely stops any background catalog loader or backfill worker before destruction."""
+        if self._loader_worker and self._loader_worker.isRunning():
+            self._loader_worker.quit()
+            self._loader_worker.wait(1000)
+        if self._backfill_worker and self._backfill_worker.isRunning():
+            self._backfill_worker.quit()
+            self._backfill_worker.wait(1000)
+
+    def closeEvent(self, event):
+        self.stop_threads()
+        super().closeEvent(event)
+
+    def __del__(self):
+        try:
+            self.stop_threads()
+        except Exception:
+            pass
 
     def set_target_dir(self, target_dir: str):
-        """Updates target directory and reloads catalog database."""
+        """Updates target directory and reloads catalog database asynchronously."""
         if self.target_dir != target_dir:
             self.target_dir = target_dir
             if self.target_dir and os.path.exists(self.target_dir):
                 self.db = DatabaseManager(self.target_dir)
             else:
                 self.db = None
-            self.reload_catalog()
+            self.reload_catalog(blocking=False)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -303,6 +521,10 @@ class DBCatalogWidget(QWidget):
         self.search_input.textChanged.connect(self._on_search_text_changed)
         self.search_input.returnPressed.connect(self._apply_filter)
 
+        btn_index = QPushButton("📁 Index Media Folder...")
+        btn_index.setToolTip("Index any media folder in-place to create or update .sd_backup_catalog.db for QuickImageCullLAN")
+        btn_index.clicked.connect(self._open_index_folder_dialog)
+
         btn_renamer = QPushButton("✏️ Batch Rename Suffixes...")
         btn_renamer.setToolTip("Rename file suffixes on disk and update SQLite database catalog")
         btn_renamer.clicked.connect(self._open_renamer_dialog)
@@ -315,17 +537,38 @@ class DBCatalogWidget(QWidget):
         self.btn_backfill.setToolTip("Extract EXIF & MediaInfo metadata for cataloged files missing metadata")
         self.btn_backfill.clicked.connect(self._on_manual_backfill)
 
-        btn_refresh = QPushButton("⚡ Refresh")
-        btn_refresh.clicked.connect(self.reload_catalog)
+        self.btn_refresh = QPushButton("⚡ Refresh")
+        self.btn_refresh.clicked.connect(lambda: self.reload_catalog(blocking=False))
 
         top_bar.addWidget(self.dir_label)
         top_bar.addWidget(self.search_input, 1)
-        top_bar.addWidget(btn_renamer)
-        top_bar.addWidget(btn_sync)
-        top_bar.addWidget(self.btn_backfill)
-        top_bar.addWidget(btn_refresh)
         main_layout.addLayout(top_bar)
 
+        # Action buttons wrap onto further lines rather than forcing the window wide.
+        action_bar = FlowLayout(margin=0, h_spacing=8, v_spacing=6)
+        action_bar.addWidget(btn_index)
+        action_bar.addWidget(btn_renamer)
+        action_bar.addWidget(btn_sync)
+        action_bar.addWidget(self.btn_backfill)
+        action_bar.addWidget(self.btn_refresh)
+        main_layout.addLayout(action_bar)
+
+        # Loading Progress Bar
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setRange(0, 0)
+        self.loading_bar.setTextVisible(False)
+        self.loading_bar.setFixedHeight(3)
+        self.loading_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                background-color: #222222;
+            }
+            QProgressBar::chunk {
+                background-color: #00ADB5;
+            }
+        """)
+        self.loading_bar.hide()
+        main_layout.addWidget(self.loading_bar)
 
         # Center Splitter: Table (Left) + Inspector Panel (Right)
         splitter = QSplitter(Qt.Horizontal)
@@ -371,83 +614,109 @@ class DBCatalogWidget(QWidget):
         self.btn_delete_disk_db.clicked.connect(self._on_delete_disk_and_db)
 
         bottom_bar.addWidget(self.status_label)
-        bottom_bar.addStretch()
-        bottom_bar.addWidget(self.btn_purge_db)
-        bottom_bar.addWidget(self.btn_delete_disk_db)
         main_layout.addLayout(bottom_bar)
 
+        delete_bar = FlowLayout(margin=0, h_spacing=8, v_spacing=6)
+        delete_bar.addWidget(self.btn_purge_db)
+        delete_bar.addWidget(self.btn_delete_disk_db)
+        main_layout.addLayout(delete_bar)
 
     def _on_search_text_changed(self):
         """Restarts the 400ms single-shot timer to debounce typing/backspacing."""
         self.search_timer.start()
 
-    def reload_catalog(self):
-        self.table.setRowCount(0)
-        self.rows_data.clear()
-
+    def reload_catalog(self, blocking: bool = False):
         dir_name = os.path.basename(self.target_dir) if self.target_dir else "No target selected"
         self.dir_label.setText(f"<b>Catalog:</b> {dir_name}/")
 
         if not self.target_dir or not os.path.exists(self.target_dir):
+            self.table.setRowCount(0)
+            self.rows_data.clear()
             self.status_label.setText("Select a valid target backup directory to view catalog.")
             return
 
         if not self.db:
             self.db = DatabaseManager(self.target_dir)
 
-        try:
-            # Auto-backfill missing EXIF/MediaInfo metadata for legacy cataloged files
-            self.db.backfill_missing_metadata()
-        except Exception as ex:
-            logging.warning(f"Auto-backfill metadata notice: {ex}")
+        if blocking:
+            try:
+                with self.db._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT 
+                            fc.file_id, fc.composite_hash, fc.original_filename, fc.relative_path,
+                            fc.destination_filename, fc.target_relative_path,
+                            fc.file_size_bytes, fc.date_taken, fc.date_taken_source,
+                            tm.copy_status, tm.destination_path,
+                            fm.camera_make, fm.camera_model, fm.lens_model, fm.serial_number,
+                            fm.iso, fm.aperture, fm.shutter_speed, fm.focal_length, fm.white_balance,
+                            fm.width, fm.height, fm.aspect_ratio, fm.color_space,
+                            fm.video_codec, fm.container_format, fm.frame_rate, fm.duration_seconds,
+                            fm.bitrate, fm.audio_codec, fm.audio_channels, fm.audio_sample_rate,
+                            fm.latitude, fm.longitude, fm.altitude, fm.raw_json
+                        FROM file_catalog fc
+                        LEFT JOIN transfer_manifest tm ON fc.composite_hash = tm.composite_hash
+                        LEFT JOIN file_metadata fm ON fc.composite_hash = fm.composite_hash
+                        ORDER BY fc.file_id DESC
+                    """)
+                    rows = [dict(row) for row in cursor.fetchall()]
+                self._on_catalog_loaded(rows)
+            except Exception as e:
+                self.status_label.setText(f"Error: {e}")
+            return
 
-        try:
-            with self.db._get_connection() as conn:
+        if self._loader_worker and self._loader_worker.isRunning():
+            return
 
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT 
-                        fc.file_id, fc.composite_hash, fc.original_filename, fc.relative_path,
-                        fc.destination_filename, fc.target_relative_path,
-                        fc.file_size_bytes, fc.date_taken, fc.date_taken_source,
-                        tm.copy_status, tm.destination_path,
-                        fm.camera_make, fm.camera_model, fm.lens_model, fm.serial_number,
-                        fm.iso, fm.aperture, fm.shutter_speed, fm.focal_length, fm.white_balance,
-                        fm.width, fm.height, fm.aspect_ratio, fm.color_space,
-                        fm.video_codec, fm.container_format, fm.frame_rate, fm.duration_seconds,
-                        fm.bitrate, fm.audio_codec, fm.audio_channels, fm.audio_sample_rate,
-                        fm.latitude, fm.longitude, fm.altitude, fm.raw_json
-                    FROM file_catalog fc
-                    LEFT JOIN transfer_manifest tm ON fc.composite_hash = tm.composite_hash
-                    LEFT JOIN file_metadata fm ON fc.composite_hash = fm.composite_hash
-                    ORDER BY fc.file_id DESC
-                """)
-                rows = cursor.fetchall()
-                for row in rows:
-                    self.rows_data.append(dict(row))
+        self.loading_bar.show()
+        self.btn_refresh.setEnabled(False)
+        self.btn_refresh.setText("⏳ Loading...")
+        self.status_label.setText("Loading catalog records in background...")
 
-            self.table.setRowCount(len(self.rows_data))
-            for i, row in enumerate(self.rows_data):
-                file_id = str(row["file_id"])
-                fname = row["original_filename"] or ""
-                rel_p = row["relative_path"] or ""
-                size_mb = f"{(row['file_size_bytes'] or 0) / (1024*1024):.2f}"
-                dt_taken = str(row["date_taken"] or "")
-                camera = f"{row['camera_make'] or ''} {row['camera_model'] or ''}".strip() or "-"
-                status = row["copy_status"] or ("COPIED" if row.get("destination_filename") else "COPIED")
+        self._loader_worker = CatalogLoaderWorker(self.target_dir, self)
+        self._loader_worker.data_loaded.connect(self._on_catalog_loaded)
+        self._loader_worker.error_occurred.connect(self._on_catalog_error)
+        self._loader_worker.start()
 
-                self.table.setItem(i, 0, QTableWidgetItem(file_id))
-                self.table.setItem(i, 1, QTableWidgetItem(fname))
-                self.table.setItem(i, 2, QTableWidgetItem(rel_p))
-                self.table.setItem(i, 3, QTableWidgetItem(size_mb))
-                self.table.setItem(i, 4, QTableWidgetItem(dt_taken))
-                self.table.setItem(i, 5, QTableWidgetItem(camera))
-                self.table.setItem(i, 6, QTableWidgetItem(status))
+    def _on_catalog_loaded(self, rows: list):
+        self.rows_data = rows
+        self._populate_table(self.rows_data)
+        self.loading_bar.hide()
+        self.btn_refresh.setEnabled(True)
+        self.btn_refresh.setText("⚡ Refresh")
+        self._apply_filter()
 
-            self._apply_filter()
+    def _on_catalog_error(self, err: str):
+        self.loading_bar.hide()
+        self.btn_refresh.setEnabled(True)
+        self.btn_refresh.setText("⚡ Refresh")
+        self.status_label.setText(f"Failed to load catalog: {err}")
+        QMessageBox.critical(self, "Catalog Error", f"Failed to query database catalog: {err}")
 
-        except Exception as e:
-            QMessageBox.critical(self, "Catalog Error", f"Failed to query database catalog: {e}")
+    def _populate_table(self, rows: list):
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        self.table.setRowCount(len(rows))
+
+        for i, row in enumerate(rows):
+            file_id = str(row["file_id"])
+            fname = row["original_filename"] or ""
+            rel_p = row["relative_path"] or ""
+            size_mb = f"{(row['file_size_bytes'] or 0) / (1024*1024):.2f}"
+            dt_taken = str(row["date_taken"] or "")
+            camera = f"{row['camera_make'] or ''} {row['camera_model'] or ''}".strip() or "-"
+            status = row["copy_status"] or ("COPIED" if row.get("destination_filename") else "COPIED")
+
+            self.table.setItem(i, 0, QTableWidgetItem(file_id))
+            self.table.setItem(i, 1, QTableWidgetItem(fname))
+            self.table.setItem(i, 2, QTableWidgetItem(rel_p))
+            self.table.setItem(i, 3, QTableWidgetItem(size_mb))
+            self.table.setItem(i, 4, QTableWidgetItem(dt_taken))
+            self.table.setItem(i, 5, QTableWidgetItem(camera))
+            self.table.setItem(i, 6, QTableWidgetItem(status))
+
+        self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
 
     def _apply_filter(self):
         query = self.search_input.text().strip().lower()
@@ -609,6 +878,12 @@ class DBCatalogWidget(QWidget):
                 QMessageBox.critical(self, "Delete Error", f"Failed to delete file/record: {e}")
 
 
+    def _open_index_folder_dialog(self):
+        dialog = IndexFolderDialog(initial_folder=self.target_dir, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            if dialog.indexed_folder_path:
+                self.set_target_dir(dialog.indexed_folder_path)
+
     def _open_renamer_dialog(self):
         if not self.target_dir or not os.path.exists(self.target_dir):
             QMessageBox.warning(self, "Target Required", "Please select a valid target backup directory first.")
@@ -630,16 +905,35 @@ class DBCatalogWidget(QWidget):
             QMessageBox.warning(self, "Target Required", "Please select a valid target backup directory first.")
             return
 
-        try:
-            count = self.db.backfill_missing_metadata(force_reextract=True)
-            self.reload_catalog()
-            QMessageBox.information(
-                self,
-                "Metadata Extraction Complete 🎉",
-                f"Successfully scanned catalog and extracted EXIF/MediaInfo metadata for {count} media files!"
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "Extraction Error", f"Failed to extract missing metadata: {e}")
+        if self._backfill_worker and self._backfill_worker.isRunning():
+            return
+
+        self.btn_backfill.setEnabled(False)
+        self.btn_backfill.setText("⏳ Extracting EXIF...")
+        self.loading_bar.show()
+        self.status_label.setText("Extracting metadata from media files in background...")
+
+        self._backfill_worker = MetadataBackfillWorker(self.target_dir, force_reextract=True, parent=self)
+        self._backfill_worker.completed.connect(self._on_backfill_completed)
+        self._backfill_worker.error_occurred.connect(self._on_backfill_error)
+        self._backfill_worker.start()
+
+    def _on_backfill_completed(self, count: int):
+        self.btn_backfill.setEnabled(True)
+        self.btn_backfill.setText("📷 Extract Missing EXIF...")
+        self.loading_bar.hide()
+        self.reload_catalog(blocking=False)
+        QMessageBox.information(
+            self,
+            "Metadata Extraction Complete 🎉",
+            f"Successfully scanned catalog and extracted EXIF/MediaInfo metadata for {count} media files!"
+        )
+
+    def _on_backfill_error(self, err: str):
+        self.btn_backfill.setEnabled(True)
+        self.btn_backfill.setText("📷 Extract Missing EXIF...")
+        self.loading_bar.hide()
+        QMessageBox.critical(self, "Extraction Error", f"Failed to extract missing metadata: {err}")
 
 
 

@@ -24,6 +24,7 @@ from core.worker import BackupWorker
 from core.logger import QtSignalingLogHandler
 from core.mtp_engine import is_mtp_path
 from utils.path_formatter import normalize_win_path
+from utils.resource_path import get_config_path
 
 
 class MainWindow(QMainWindow):
@@ -33,9 +34,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("SD-FastBackup")
         self.resize(1020, 800)
-        self.setMinimumSize(880, 680)
+        # No explicit minimum: an explicit floor below what the layout actually needs
+        # lets Qt into a geometry the layout cannot honour, which is what clipped the
+        # option controls. The wrapping options row keeps the computed minimum small.
+        self.setMinimumSize(0, 0)
 
-        self.config_path = config_path or os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+        self.config_path = config_path or get_config_path()
         self.worker: Optional[BackupWorker] = None
         self.fastcopy_path = ""
         self._rescan_full_drive = False
@@ -43,6 +47,10 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._setup_logging()
         self.load_config()
+
+    def show_default(self):
+        """Opens the window maximized — the option and log panels want the full width."""
+        self.showMaximized()
 
     def _init_ui(self):
         central_widget = QWidget(self)
@@ -57,6 +65,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel("⚡ SD-FastBackup")
         title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #00ADB5;")
         subtitle_label = QLabel("Ultra-Fast Deduplicated SD Card & Mobile Phone (MTP) Backup Engine")
+        subtitle_label.setWordWrap(True)
         subtitle_label.setStyleSheet("color: #888888; font-size: 12px; margin-left: 10px;")
 
         header_layout.addWidget(title_label)
@@ -333,8 +342,8 @@ class MainWindow(QMainWindow):
             mode_str = "FastCopy Batch Transfer"
         self.log_console.append_trace(f"🚀 {mode_str} phase started ({total_files} files, {gb:.2f} GB)")
 
-    def _on_transfer_progress(self, copied_count: int, total_files: int, current_filename: str, file_pct: int):
-        self.progress_panel.update_transfer_progress(copied_count, total_files, current_filename, file_pct)
+    def _on_transfer_progress(self, copied_count: int, total_files: int, current_filename: str):
+        self.progress_panel.update_transfer_progress(copied_count, total_files, current_filename)
 
     def _on_transfer_metrics(self, metrics: dict):
         self.progress_panel.update_realtime_metrics(metrics)
@@ -350,7 +359,6 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.progress_panel.overall_bar.setValue(100)
-        self.progress_panel.file_bar.setValue(100)
         
         mode_str = "Move" if (self.worker and self.worker.move_mode) else "Backup"
         self.progress_panel.status_label.setText(f"Status: {mode_str} Completed Successfully 🎉")

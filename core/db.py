@@ -6,9 +6,69 @@ import sqlite3
 import os
 import gc
 import logging
+from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
 
 from utils.path_formatter import normalize_win_path, is_safe_relative_path
+
+
+def register_metadata_batched(
+    db: "DatabaseManager",
+    targets: List[tuple],
+    chunk_size: int = 200,
+    progress_callback=None,
+    camera_make_fallback: Optional[str] = None,
+) -> int:
+    """Extract and store extended metadata for many files, one ExifTool call per chunk.
+
+    `targets` is a list of (file_path, composite_hash, filename). Extracting per file
+    spawned ExifTool once per file (~430ms of interpreter startup each), which dominated
+    every path that catalogs metadata — imports, reconciles, and folder indexing alike.
+    Each chunk's catalog writes also share a single connection and transaction.
+
+    `progress_callback(done, total)` is invoked after each chunk. Returns the number of
+    files whose metadata was stored.
+    """
+    from core.metadata import MetadataExtractor
+
+    if not targets:
+        return 0
+
+    total = len(targets)
+    done = 0
+    stored = 0
+
+    for start in range(0, total, chunk_size):
+        chunk = targets[start:start + chunk_size]
+        try:
+            results = MetadataExtractor.extract_full_metadata_batch(
+                [t[0] for t in chunk], chunk_size=chunk_size
+            )
+        except Exception:
+            logging.warning("Batched metadata extraction failed for a chunk.", exc_info=True)
+            results = {}
+
+        try:
+            with db.batch() as conn:
+                for file_path, composite_hash, filename in chunk:
+                    meta = results.get(file_path)
+                    if not meta:
+                        continue
+                    if camera_make_fallback:
+                        meta["camera_make"] = meta.get("camera_make") or camera_make_fallback
+                    db.register_metadata(composite_hash, filename, meta, conn=conn)
+                    stored += 1
+        except Exception:
+            logging.warning("Could not persist a metadata chunk.", exc_info=True)
+
+        done += len(chunk)
+        if progress_callback:
+            try:
+                progress_callback(done, total)
+            except Exception:
+                pass
+
+    return stored
 
 
 class DatabaseManager:
@@ -117,6 +177,36 @@ class DatabaseManager:
             # Automatically purge legacy DUPLICATE_SKIPPED entries from transfer_manifest
             conn.execute("DELETE FROM transfer_manifest WHERE copy_status = 'DUPLICATE_SKIPPED';")
 
+    @contextmanager
+    def batch(self):
+        """Yields one connection for a burst of writes, committed once at the end.
+
+        Each write method otherwise opens its own connection (re-running the WAL and
+        foreign-key PRAGMAs every time), which cost ~80ms per file across the three
+        writes the transfer path makes — far more than the transfer itself in move mode.
+        Pass the yielded connection as `conn=` to keep a whole loop on one transaction.
+
+        Rolls back if the body raises, so a failed session leaves no partial rows.
+        """
+        conn = self._get_connection()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _write(self, conn: Optional[sqlite3.Connection]):
+        """Uses the caller's batch connection when given, else a one-shot connection."""
+        if conn is not None:
+            yield conn          # the batch owns the commit
+        else:
+            with self._get_connection() as own:
+                yield own
+
     def register_volume(self, volume_serial: str, volume_label: str):
         """Registers or updates a scanned SD card volume record."""
         with self._get_connection() as conn:
@@ -137,9 +227,15 @@ class DatabaseManager:
         date_taken: str, 
         source: str,
         destination_filename: Optional[str] = None,
-        target_relative_path: Optional[str] = None
+        target_relative_path: Optional[str] = None,
+        conn: Optional[sqlite3.Connection] = None
     ):
-        """Registers a discovered or transferred file into the file_catalog table."""
+        """Registers a discovered or transferred file into the file_catalog table.
+
+        Pass `conn` from DatabaseManager.batch() to keep a loop of registrations on a
+        single connection and transaction. The path guard below applies either way —
+        this stays the one write path into file_catalog.
+        """
         # Guard the single catalog write path: never persist a non-archive-relative
         # target path. The culler joins archive_root / target_relative_path and rejects
         # absolute/drive-lettered/UNC/'..'-escaping paths, so storing one here would make
@@ -156,8 +252,8 @@ class DatabaseManager:
                 )
                 target_relative_path = None
 
-        with self._get_connection() as conn:
-            conn.execute("""
+        with self._write(conn) as c:
+            c.execute("""
                 INSERT INTO file_catalog (
                     composite_hash, original_filename, relative_path, 
                     destination_filename, target_relative_path, 
@@ -169,10 +265,11 @@ class DatabaseManager:
                     target_relative_path = COALESCE(excluded.target_relative_path, file_catalog.target_relative_path)
             """, (composite_hash, filename, rel_path, destination_filename, target_relative_path, size, date_taken, source))
 
-    def register_metadata(self, composite_hash: str, filename: str, metadata: Dict[str, Any]):
+    def register_metadata(self, composite_hash: str, filename: str, metadata: Dict[str, Any],
+                          conn: Optional[sqlite3.Connection] = None):
         """Registers or updates extended image/video metadata in file_metadata table."""
-        with self._get_connection() as conn:
-            conn.execute("""
+        with self._write(conn) as c:
+            c.execute("""
                 INSERT INTO file_metadata (
                     composite_hash, original_filename, camera_make, camera_model, lens_model, serial_number,
                     iso, aperture, shutter_speed, focal_length, white_balance, width, height, aspect_ratio,
@@ -225,10 +322,11 @@ class DatabaseManager:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def update_transfer_status(self, composite_hash: str, source_path: str, dest_path: str, status: str):
+    def update_transfer_status(self, composite_hash: str, source_path: str, dest_path: str, status: str,
+                               conn: Optional[sqlite3.Connection] = None):
         """Records or updates a transfer attempt in transfer_manifest."""
-        with self._get_connection() as conn:
-            conn.execute("""
+        with self._write(conn) as c:
+            c.execute("""
                 INSERT INTO transfer_manifest (composite_hash, source_path, destination_path, copy_status)
                 VALUES (?, ?, ?, ?)
             """, (composite_hash, source_path, dest_path, status))
@@ -320,6 +418,7 @@ class DatabaseManager:
         norm_target = normalize_win_path(os.path.abspath(self.target_dir))
 
         backfilled_count = 0
+        pending = []          # (file_path, composite_hash, filename) for the batched pass
         for item in missing_items:
             h_val = item["composite_hash"]
             fname = item["original_filename"]
@@ -357,12 +456,10 @@ class DatabaseManager:
                     target_file_path = disk_file_index[fname.lower()]
 
             if target_file_path and os.path.exists(target_file_path):
-                try:
-                    meta = MetadataExtractor.extract_full_metadata(target_file_path)
-                    self.register_metadata(h_val, fname, meta)
-                    backfilled_count += 1
-                except Exception as e:
-                    logging.warning(f"Could not backfill metadata for '{target_file_path}': {e}")
+                pending.append((target_file_path, h_val, fname))
+
+        # Extract in batches rather than spawning ExifTool once per file.
+        backfilled_count = register_metadata_batched(self, pending)
 
         if backfilled_count > 0:
             self.checkpoint()
@@ -409,6 +506,21 @@ class DatabaseManager:
             ).fetchone()
             return int(row["value"])
 
+    def set_in_progress(self, in_progress: bool = True):
+        """Sets the 'in_progress' flag in catalog_meta so readers can guard against mid-write state."""
+        val = "1" if in_progress else "0"
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO catalog_meta (key, value) VALUES ('in_progress', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (val,))
+
+    def is_in_progress(self) -> bool:
+        """Returns True if catalog has in_progress == '1'."""
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT value FROM catalog_meta WHERE key = 'in_progress'").fetchone()
+            return bool(row and row["value"] == "1")
+
     def checkpoint(self):
         """Runs a WAL checkpoint to flush WAL logs to disk."""
         with self._get_connection() as conn:
@@ -425,6 +537,12 @@ class DatabaseManager:
         DELETE mode, which removes the -wal/-shm sidecars once the connection closes.
         The next write re-enters WAL automatically via _get_connection().
         """
+        # Clear in_progress flag before checkpointing so external readers see clean state
+        try:
+            self.set_in_progress(False)
+        except Exception:
+            pass
+
         # Phase 1: flush every committed frame from the WAL into the main db file.
         # After a TRUNCATE checkpoint the -wal is emptied, so an immutable reader already
         # sees all committed data safely even if the sidecar files still exist.

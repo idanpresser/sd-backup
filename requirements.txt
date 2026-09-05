@@ -3,3 +3,4 @@ exifread>=3.0.0
 pymediainfo>=6.0.0
 pywin32>=306
 pytest>=7.0.0
+pyinstaller>=6.0.0

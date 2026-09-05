@@ -1,12 +1,17 @@
 """
-Dual Progress Bar Component for SD-FastBackup.
-Displays Overall Progress %, Current File Progress %, Transfer Speed (MB/s), and Bytes Written / Total Bytes.
+Progress Panel Component for SD-FastBackup.
+Displays Overall Progress %, Transfer Speed (MB/s), and Bytes Written / Total Bytes.
+
+There is deliberately no per-file progress bar: no ingest engine exposes per-file byte
+progress (FastCopy reports aggregate batch bytes, a same-volume move is a rename, and an
+MTP copy is a single blocking COM call), so such a bar could only mirror overall progress
+or sit pinned at 100%.
 """
 from PySide6.QtWidgets import QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar
 
 
 class ProgressPanelWidget(QGroupBox):
-    """Dual Progress Meter & Transfer Speed Tracker Widget."""
+    """Overall Progress Meter & Transfer Speed Tracker Widget."""
 
     def __init__(self, parent=None):
         super().__init__("BACKUP PIPELINE PROGRESS", parent)
@@ -19,13 +24,14 @@ class ProgressPanelWidget(QGroupBox):
 
         # 1. Status Label Row
         self.status_label = QLabel("Status: Ready")
+        self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("font-weight: bold; color: #E0E0E0;")
         layout.addWidget(self.status_label)
 
         # 2. Overall Progress Meter
         overall_layout = QHBoxLayout()
         overall_title = QLabel("Overall Progress:")
-        overall_title.setFixedWidth(120)
+        overall_title.setMinimumWidth(120)
         self.overall_bar = QProgressBar()
         self.overall_bar.setRange(0, 100)
         self.overall_bar.setValue(0)
@@ -33,33 +39,21 @@ class ProgressPanelWidget(QGroupBox):
         overall_layout.addWidget(self.overall_bar, 1)
         layout.addLayout(overall_layout)
 
-        # 3. Current File Progress Meter
-        file_layout = QHBoxLayout()
-        file_title = QLabel("Current File:")
-        file_title.setFixedWidth(120)
-        self.file_bar = QProgressBar()
-        self.file_bar.setRange(0, 100)
-        self.file_bar.setValue(0)
-        file_layout.addWidget(file_title)
-        file_layout.addWidget(self.file_bar, 1)
-        layout.addLayout(file_layout)
-
-        # 4. Details / Speed Indicator
+        # 3. Details / Speed Indicator
         self.details_label = QLabel("Files: 0 / 0 | Bytes: 0 B | Speed: --")
+        self.details_label.setWordWrap(True)
         self.details_label.setStyleSheet("color: #00ADB5; font-size: 12px;")
         layout.addWidget(self.details_label)
 
     def reset_progress(self):
         self.total_bytes = 0
         self.overall_bar.setValue(0)
-        self.file_bar.setValue(0)
         self.status_label.setText("Status: Starting pipeline...")
         self.details_label.setText("Files: 0 / 0 | Bytes: 0 B | Speed: --")
 
     def update_scan_progress(self, current: int, total: int, filename: str):
         pct = int((current / total * 100)) if total > 0 else 0
         self.overall_bar.setValue(pct)
-        self.file_bar.setValue(pct)
         self.status_label.setText(f"Status [Scanning {current}/{total}]: {filename}")
         self.details_label.setText(f"Scanned: {current} / {total} files")
 
@@ -67,7 +61,6 @@ class ProgressPanelWidget(QGroupBox):
         self.total_bytes = total_bytes
         gb = total_bytes / (1024 ** 3)
         self.overall_bar.setValue(0)
-        self.file_bar.setValue(0)
         self.status_label.setText(f"Status: FastCopy batch transferring {total_files} files ({gb:.2f} GB)...")
         self.details_label.setText(f"Transferred: 0.00 / {gb:.2f} GB | Speed: --")
 
@@ -81,7 +74,6 @@ class ProgressPanelWidget(QGroupBox):
 
         if pct is not None:
             self.overall_bar.setValue(int(pct))
-            self.file_bar.setValue(int(pct))
 
         if current_file:
             self.status_label.setText(f"Status [FastCopy]: {current_file}")
@@ -94,20 +86,14 @@ class ProgressPanelWidget(QGroupBox):
                 detail += f" | Speed: {speed}"
             self.details_label.setText(detail)
 
-    def update_transfer_progress(self, copied_count: int, total_files: int, current_filename: str, file_pct: int = 100):
+    def update_transfer_progress(self, copied_count: int, total_files: int, current_filename: str):
         overall_pct = int((copied_count / total_files * 100)) if total_files > 0 else 0
         self.overall_bar.setValue(overall_pct)
-        self.file_bar.setValue(file_pct)
         self.status_label.setText(f"Status [Finalizing {copied_count}/{total_files}]: {current_filename}")
         self.details_label.setText(f"Finalized: {copied_count} / {total_files} files ({overall_pct}%)")
 
     def update_overall(self, current: int, total: int, status_msg: str = ""):
         self.update_scan_progress(current, total, status_msg)
-
-    def update_file_progress(self, percent: int, filename: str = ""):
-        self.file_bar.setValue(percent)
-        if filename:
-            self.status_label.setText(f"Status: {filename}")
 
     def update_details(self, files_str: str, bytes_str: str):
         self.details_label.setText(f"Files: {files_str} | Transferred: {bytes_str}")

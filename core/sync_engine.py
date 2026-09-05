@@ -10,7 +10,7 @@ from typing import Dict, Any, List
 from utils.path_formatter import normalize_win_path
 from utils.media_filter import is_blacklisted_system_file, is_media_file
 from core.metadata import MetadataExtractor
-from core.db import DatabaseManager
+from core.db import DatabaseManager, register_metadata_batched
 
 
 def _scope_walk_roots(norm_root: str, scope_subdirs) -> List[str]:
@@ -156,10 +156,13 @@ def execute_sync(
     added_count = 0
     deleted_disk_count = 0
     errors = 0
+    pending_metadata = []      # (file_path, composite_hash, filename) for the batched pass
 
     # 1. Remove missing records from SQLite DB
     if remove_missing and diff["missing_records"]:
-        with db._get_connection() as conn:
+        # Closed explicitly so the handle does not hold the WAL lock through finalize().
+        conn = db._get_connection()
+        try:
             cursor = conn.cursor()
             for rec in diff["missing_records"]:
                 h = rec["composite_hash"]
@@ -172,6 +175,8 @@ def execute_sync(
                     logging.error(f"Error purging missing record '{h}': {e}")
                     errors += 1
             conn.commit()
+        finally:
+            conn.close()
 
     # Determine active action for uncataloged files
     effective_action = uncataloged_action
@@ -203,8 +208,7 @@ def execute_sync(
                         target_relative_path=rel_p
                     )
                     db.update_transfer_status(comp_hash, full_p, full_p, "COPIED")
-                    meta = MetadataExtractor.extract_full_metadata(full_p)
-                    db.register_metadata(comp_hash, fname, meta)
+                    pending_metadata.append((full_p, comp_hash, fname))
                     added_count += 1
                 except Exception as e:
                     logging.error(f"Error adding uncataloged file '{full_p}' to DB: {e}")
@@ -220,6 +224,9 @@ def execute_sync(
                     except Exception as e:
                         logging.error(f"Error deleting uncataloged file '{full_p}' from disk: {e}")
                         errors += 1
+
+    # One ExifTool invocation per chunk instead of one per newly indexed file.
+    register_metadata_batched(db, pending_metadata)
 
     # Signal consumers that the catalog changed, then leave it quiescent for readers.
     if removed_count or added_count:

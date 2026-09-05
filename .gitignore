@@ -1,4 +1,3 @@
-
 # Python / Cache
 __pycache__/
 *.pyc
@@ -10,11 +9,13 @@ bin/FSViewer*/
 bin/exiftool.exe
 bin/exiftool_files/
 
+# PyInstaller builds
+build/
+dist/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
-
-

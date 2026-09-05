@@ -35,8 +35,10 @@ def test_progress_panel_widget():
     panel.reset_progress()
     panel.update_overall(50, 100, "50 / 100 files")
     assert panel.overall_bar.value() == 50
-    panel.update_file_progress(75, "Copying IMG_0001.JPG")
-    assert panel.file_bar.value() == 75
+    # The per-file bar was removed: no ingest engine reports per-file byte progress,
+    # so it could only mirror overall progress or sit at 100%. See test_ui_layout.py.
+    panel.update_transfer_progress(3, 4, "IMG_0001.JPG")
+    assert panel.overall_bar.value() == 75
 
 
 def test_log_console_widget():
